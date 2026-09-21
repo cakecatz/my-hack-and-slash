@@ -15,6 +15,7 @@ func run() -> void:
 	seed(42)
 	var scene = load("res://scenes/main.tscn").instantiate()
 	scene.save_enabled = false
+	scene.profile.loot_mode = 0
 	root.add_child(scene)
 	scene.set_process(false)
 	check(scene.hub and scene.profile.level == 1, "Start in hub")
@@ -45,7 +46,7 @@ func run() -> void:
 	check(scene.panel == "gate", "Nearby gate opens destinations")
 	check(not scene.travel_from_gate(1), "Higher maps locked")
 	check(scene.travel_from_gate(0) and scene.panel.is_empty(), "Travel through gate closes panel")
-	check(scene.enemies.size() == 13 and not scene.hub, "Finite map population")
+	check(scene.enemies.size() == 51 and not scene.hub, "Finite map population")
 	check(not scene.enter_map(0), "Cannot restart active expedition")
 	var enemy: Dictionary = scene.enemies[0]
 	enemy.pos = scene.player + Vector2(55, 0)
@@ -64,7 +65,10 @@ func run() -> void:
 	check(scene.profile.stats() == old_stats, "Equipment changes only at hub")
 	var boss_index: int = scene.enemies.size() - 1
 	scene.defeat_enemy(boss_index)
-	check(scene.map_cleared and scene.profile.unlocked == 2 and not scene.hub, "Boss unlocks next map without forcing exit")
+	check(scene.map_cleared and scene.profile.campaign == 1 and scene.profile.unlocked == 1 and not scene.hub, "Boss advances expedition without skipping chapter")
+	scene.profile.complete_mission(1)
+	scene.profile.complete_mission(2)
+	check(scene.profile.unlocked == 2, "Three expeditions unlock next chapter")
 	check(scene.drops[-1].item.rarity == 2, "Boss guarantees rare loot")
 	scene.player = scene.drops[-1].pos
 	scene.pickup_nearby()
@@ -133,7 +137,7 @@ func run() -> void:
 	check(scene.profile.stats() == improved, "Inventory cannot equip during expedition")
 	scene.return_to_hub()
 	# A separate test save never touches the real character.
-	var path := "user://smoke_character.json"
+	var path := "/tmp/ember_smoke_%d.json" % OS.get_process_id()
 	check(scene.profile.save_to(path), "Save character")
 	var loaded = Profile.new()
 	check(loaded.load_from(path), "Load character")
@@ -149,7 +153,7 @@ func run() -> void:
 	check(not loaded.load_from(path) and loaded.stats() == improved, "Malformed save rejected without mutating profile")
 	DirAccess.remove_absolute(path)
 	# Exercise panels as well as hub, expedition, pause, and death draw paths.
-	for mode in ["inventory", "stash", "gate", ""]:
+	for mode in ["inventory", "stash", "gate", "build", ""]:
 		scene.panel = mode
 		scene.queue_redraw()
 		await process_frame

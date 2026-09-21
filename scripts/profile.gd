@@ -5,6 +5,7 @@ const SAVE_PATH := "user://character.json"
 const RARITIES := ["Common", "Magic", "Rare"]
 const SLOTS := ["weapon", "armor", "charm"]
 var inventory: Array[Dictionary] = []
+var stash: Array[Dictionary] = []
 var equipment: Dictionary = {
 	"weapon": {"name": "Worn sword", "slot": "weapon", "rarity": 0, "tier": 1, "attack": 10, "health": 0, "armor": 0, "haste": 0},
 	"armor": {"name": "Traveler coat", "slot": "armor", "rarity": 0, "tier": 1, "attack": 0, "health": 10, "armor": 1, "haste": 0},
@@ -68,12 +69,21 @@ func equip(index: int) -> bool:
 		inventory.insert(index, previous)
 	return true
 
+func transfer_item(index: int, to_stash: bool) -> bool:
+	var source: Array[Dictionary] = inventory if to_stash else stash
+	var target: Array[Dictionary] = stash if to_stash else inventory
+	if index < 0 or index >= source.size():
+		return false
+	target.append(source[index])
+	source.remove_at(index)
+	return true
+
 func save_to(path: String = SAVE_PATH) -> bool:
 	var file := FileAccess.open(path + ".tmp", FileAccess.WRITE)
 	if file == null:
 		save_error = "Save failed. Progress is in memory only."
 		return false
-	file.store_string(JSON.stringify({"version": 1, "inventory": inventory, "equipment": equipment, "level": level, "xp": xp, "unlocked": unlocked}))
+	file.store_string(JSON.stringify({"version": 2, "inventory": inventory, "stash": stash, "equipment": equipment, "level": level, "xp": xp, "unlocked": unlocked}))
 	file.flush()
 	var write_error := file.get_error()
 	file.close()
@@ -100,7 +110,7 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	if file == null:
 		return false
 	var data: Variant = JSON.parse_string(file.get_as_text())
-	if not data is Dictionary or data.get("version") != 1:
+	if not data is Dictionary or (data.get("version") != 1 and data.get("version") != 2):
 		return false
 	if not data.get("inventory") is Array or not data.get("equipment") is Dictionary:
 		return false
@@ -110,6 +120,12 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	if data.level < 1 or data.level > 100000 or data.xp < 0 or data.xp >= 40 + (data.level - 1) * 25 or data.unlocked < 1 or data.unlocked > 3:
 		return false
 	for item in data.inventory:
+		if not valid_item(item):
+			return false
+	var saved_stash: Variant = data.get("stash", []) if data.version == 2 else []
+	if not saved_stash is Array:
+		return false
+	for item in saved_stash:
 		if not valid_item(item):
 			return false
 	for slot in SLOTS:
@@ -123,6 +139,9 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	for item in data.inventory:
 		restored.append(normalize_item(item))
 	inventory = restored
+	stash.clear()
+	for item in saved_stash:
+		stash.append(normalize_item(item))
 	for slot in SLOTS:
 		equipment[slot] = normalize_item(data.equipment[slot])
 	level = int(data.level)

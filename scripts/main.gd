@@ -3,6 +3,12 @@ extends Node2D
 const Profile = preload("res://scripts/profile.gd")
 const VIEW := Rect2(24, 108, 1104, 540)
 const WORLD := Rect2(0, 0, 2400, 1500)
+const HUB_BOUNDS := Rect2(40, 40, 1024, 460)
+const HUB_SPAWN := Vector2(552, 390)
+const STASH_POS := Vector2(285, 230)
+const GATE_POS := Vector2(830, 230)
+const GRID_PAGE_SIZE := 24
+const CLOSE_RECT := Rect2(982, 150, 40, 32)
 const MINT := Color("70efd0")
 const GOLD := Color("ffc478")
 const RED := Color("f27386")
@@ -18,7 +24,7 @@ var save_enabled := true
 var hub := true
 var map_index := 0
 var map_cleared := false
-var player := Vector2(180, 750)
+var player := HUB_SPAWN
 var facing := Vector2.RIGHT
 var camera := Vector2.ZERO
 var hp := 100.0
@@ -40,7 +46,12 @@ var found := 0
 var paused := false
 var ended := false
 var page := 0
-var message := "Choose a destination. Hunt, collect gear, return and equip."
+var stash_page := 0
+# Empty, inventory, stash, or gate. Open panels suspend world simulation.
+var panel := ""
+var attack_blocked := false
+var town_clock := 0.0
+var message := "Walk to the stash or warp gate and press E. I opens your inventory."
 var enemies: Array[Dictionary] = []
 var drops: Array[Dictionary] = []
 var particles: Array[Dictionary] = []
@@ -86,15 +97,32 @@ func _unhandled_input(event: InputEvent) -> void:
 			if event.keycode == KEY_R:
 				return_to_hub(true)
 			return
-		if event.keycode == KEY_ESCAPE and not hub:
-			paused = not paused
+		if event.keycode == KEY_ESCAPE:
+			if not panel.is_empty():
+				close_panel()
+			else:
+				paused = not paused
 			return
 		if paused:
 			return
+		if event.keycode == KEY_I:
+			if panel == "inventory" or panel == "stash":
+				close_panel()
+			else:
+				panel = "inventory"
+				return_time = 0
+			return
+		if not panel.is_empty():
+			if event.keycode == KEY_E:
+				close_panel()
+			elif panel == "gate" and event.keycode >= KEY_1 and event.keycode <= KEY_3:
+				travel_from_gate(event.keycode - KEY_1)
+			return
 		if hub:
-			if event.keycode >= KEY_1 and event.keycode <= KEY_3:
-				enter_map(event.keycode - KEY_1)
-		elif event.keycode == KEY_E:
+			if event.keycode == KEY_E:
+				interact_hub()
+			return
+		if event.keycode == KEY_E:
 			pickup_nearby()
 		elif event.keycode == KEY_T:
 			return_time = 2.0
@@ -103,25 +131,87 @@ func _unhandled_input(event: InputEvent) -> void:
 			if potions > 0 and hp < max_hp:
 				potions -= 1
 				hp = minf(max_hp, hp + max_hp * 0.5)
-	if event is InputEventMouseButton and event.pressed and hub:
-		if event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			page = mini(page + 1, maxi(0, (profile.inventory.size() - 1) / 6))
-		elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
-			page = maxi(0, page - 1)
-		elif event.button_index == MOUSE_BUTTON_LEFT:
-			var mouse := get_global_mouse_position()
+	if event is InputEventMouseButton and event.pressed and not paused and not ended:
+		panel_mouse(event.position, event.button_index, event.shift_pressed)
+
+func close_panel() -> void:
+	panel = ""
+	attack_blocked = true
+
+func interact_hub() -> void:
+	if not hub or not panel.is_empty():
+		return
+	if player.distance_to(STASH_POS) <= 110:
+		panel = "stash"
+	elif player.distance_to(GATE_POS) <= 110:
+		panel = "gate"
+
+func travel_from_gate(index: int) -> bool:
+	if panel != "gate" or player.distance_to(GATE_POS) > 110:
+		return false
+	return enter_map(index)
+
+func grid_rect(cell: int, storage: bool = false) -> Rect2:
+	return Rect2(Vector2(612 if storage else 160, 314) + Vector2(cell % 6, cell / 6) * 54, Vector2(48, 48))
+
+func equipment_rect(index: int) -> Rect2:
+	return Rect2(160 + index * 115, 223, 48, 48)
+
+func page_rect(storage: bool, next: bool) -> Rect2:
+	return Rect2((612 if storage else 160) + (240 if next else 180), 542, 62, 26)
+
+func change_page(storage: bool, change: int) -> void:
+	var count: int = profile.stash.size() if storage else profile.inventory.size()
+	var last := maxi(0, (count - 1) / GRID_PAGE_SIZE)
+	if storage:
+		stash_page = clampi(stash_page + change, 0, last)
+	else:
+		page = clampi(page + change, 0, last)
+
+func transfer_item(index: int, to_stash: bool) -> void:
+	if not hub or panel != "stash" or player.distance_to(STASH_POS) > 110:
+		return
+	if profile.transfer_item(index, to_stash):
+		change_page(false, 0)
+		change_page(true, 0)
+		persist()
+
+func panel_mouse(mouse: Vector2, button: int, shift: bool) -> void:
+	if panel.is_empty():
+		return
+	if button == MOUSE_BUTTON_LEFT and CLOSE_RECT.has_point(mouse):
+		close_panel()
+		return
+	if panel == "gate":
+		if button == MOUSE_BUTTON_LEFT:
 			for i in range(3):
 				if map_rect(i).has_point(mouse):
-					enter_map(i)
+					travel_from_gate(i)
 					return
-			for row in range(6):
-				if item_rect(row).has_point(mouse):
-					equip_item(page * 6 + row)
-					return
-			if Rect2(950, 616, 70, 28).has_point(mouse):
-				page = maxi(0, page - 1)
-			if Rect2(1030, 616, 70, 28).has_point(mouse):
-				page = mini(page + 1, maxi(0, (profile.inventory.size() - 1) / 6))
+		return
+	if button == MOUSE_BUTTON_WHEEL_DOWN or button == MOUSE_BUTTON_WHEEL_UP:
+		change_page(panel == "stash" and mouse.x >= 570, 1 if button == MOUSE_BUTTON_WHEEL_DOWN else -1)
+		return
+	if button != MOUSE_BUTTON_LEFT:
+		return
+	for storage in [false, true]:
+		if storage and panel != "stash":
+			continue
+		for next in [false, true]:
+			if page_rect(storage, next).has_point(mouse):
+				change_page(storage, 1 if next else -1)
+				return
+		for cell in range(GRID_PAGE_SIZE):
+			if grid_rect(cell, storage).has_point(mouse):
+				var index := (stash_page if storage else page) * GRID_PAGE_SIZE + cell
+				if storage:
+					transfer_item(index, false)
+				elif shift and panel == "stash":
+					transfer_item(index, true)
+				else:
+					equip_item(index)
+				change_page(false, 0)
+				return
 
 func equip_item(index: int) -> void:
 	if not hub:
@@ -136,6 +226,8 @@ func enter_map(index: int) -> bool:
 	if not hub or index < 0 or index >= MAPS.size() or index >= profile.unlocked:
 		return false
 	hub = false
+	panel = ""
+	attack_blocked = true
 	map_index = index
 	map_cleared = false
 	ended = false
@@ -172,12 +264,18 @@ func spawn_enemy(pos: Vector2, boss: bool = false) -> void:
 
 func return_to_hub(defeated: bool = false) -> void:
 	hub = true
+	panel = ""
+	player = HUB_SPAWN
+	camera = Vector2.ZERO
+	dash_time = 0
+	invincible = 0
+	slash = 0
 	ended = false
 	paused = false
 	return_time = 0
 	refresh_stats()
 	hp = max_hp
-	message = "%s / %d kills / %d items collected. Equip your loot below." % ["Rescued: collected gear retained" if defeated else "Returned to town", kills, found]
+	message = "%s / %d kills / %d items collected. Visit the stash or press I to equip loot." % ["Rescued: collected gear retained" if defeated else "Returned to town", kills, found]
 	enemies.clear()
 	drops.clear()
 	particles.clear()
@@ -196,9 +294,25 @@ func pickup_nearby() -> void:
 	persist()
 
 func _process(delta: float) -> void:
-	if not hub and not paused and not ended:
-		step(delta)
+	if not paused and not ended and panel.is_empty():
+		if hub:
+			step_hub(delta)
+		else:
+			step(delta)
 	queue_redraw()
+
+func step_hub(delta: float) -> void:
+	town_clock += delta
+	var movement := Input.get_vector("left", "right", "up", "down")
+	var next := (player + movement * 245 * delta).clamp(HUB_BOUNDS.position + Vector2.ONE * 18, HUB_BOUNDS.end - Vector2.ONE * 18)
+	# The chest and campfire are solid; slide around their edges.
+	for obstacle in [STASH_POS, Vector2(552, 230)]:
+		if next.distance_to(obstacle) < 55:
+			next = obstacle + (next - obstacle).normalized() * 55
+	player = next
+	var aim := get_global_mouse_position() - VIEW.position - player
+	if aim.length() > 4:
+		facing = aim.normalized()
 
 func update_camera() -> void:
 	camera = (player - VIEW.size / 2).clamp(Vector2.ZERO, WORLD.size - VIEW.size)
@@ -225,7 +339,9 @@ func step(delta: float) -> void:
 		player += movement * 245 * delta
 	player = clamp_point(player, 18)
 	update_camera()
-	var attacking := Input.is_action_pressed("attack")
+	if not Input.is_action_pressed("attack"):
+		attack_blocked = false
+	var attacking := Input.is_action_pressed("attack") and not attack_blocked
 	if attacking and attack_cooldown <= 0:
 		attack()
 	if return_time > 0:
@@ -329,10 +445,7 @@ func item_stats(item: Dictionary) -> String:
 	return "ATK %d   HP %d   DEF %d   SPD %d%%" % [item.attack, item.health, item.armor, item.haste]
 
 func map_rect(index: int) -> Rect2:
-	return Rect2(44 + index * 365, 143, 340, 132)
-
-func item_rect(row: int) -> Rect2:
-	return Rect2(470, 330 + row * 46, 630, 42)
+	return Rect2(144 + index * 292, 280, 276, 170)
 
 func _draw() -> void:
 	draw_rect(Rect2(0, 0, 1152, 720), Color("0b101a"))
@@ -341,6 +454,8 @@ func _draw() -> void:
 	else:
 		draw_world()
 	draw_hud()
+	if not panel.is_empty():
+		draw_panel()
 	if not profile.save_error.is_empty():
 		label_at(Vector2(30, 715), profile.save_error, 13, RED)
 	if ended:
@@ -350,44 +465,180 @@ func _draw() -> void:
 		draw_overlay("PAUSED", "Esc to resume")
 
 func draw_hub() -> void:
-	label_at(Vector2(44, 128), "WAYPOINT / SELECT A MAP", 16, MINT)
+	draw_set_transform(VIEW.position)
+	draw_rect(Rect2(Vector2.ZERO, VIEW.size), Color("14202b"))
+	for x in range(40, 1064, 64):
+		for y in range(40, 500, 64):
+			draw_rect(Rect2(x + 2, y + 2, mini(60, 1062 - x), mini(60, 498 - y)), Color("1c2b36") if (x + y) % 3 else Color("202f39"))
+	draw_rect(HUB_BOUNDS, Color("44515b"), false, 5)
+	draw_line(Vector2(285, 310), Vector2(830, 310), Color("36424a"), 54)
+	draw_line(Vector2(552, 310), Vector2(552, 480), Color("36424a"), 54)
+	for x in [94, 1010]:
+		for y in [90, 443]:
+			draw_rect(Rect2(x - 12, y - 15, 24, 30), Color("46515b"))
+			draw_circle(Vector2(x, y - 20), 22, Color(1, 0.6, 0.2, 0.08))
+			draw_circle(Vector2(x, y - 20), 6, GOLD)
+	# Campfire and stone ring.
+	var fire := Vector2(552, 230)
+	draw_circle(fire, 70, Color(1, 0.5, 0.2, 0.05))
+	draw_arc(fire, 33, 0, TAU, 12, Color("69717b"), 10, true)
+	draw_line(fire + Vector2(-19, 12), fire + Vector2(19, -8), Color("9a7250"), 8)
+	draw_line(fire + Vector2(19, 12), fire + Vector2(-19, -8), Color("9a7250"), 8)
+	draw_colored_polygon(PackedVector2Array([fire + Vector2(-14, 7), fire + Vector2(0, -34 - sin(town_clock * 4) * 4), fire + Vector2(15, 7)]), GOLD)
+	# Stash chest, with lid, bands and lock.
+	var chest := STASH_POS
+	draw_circle(chest + Vector2(0, 18), 49, Color(0, 0, 0, 0.24))
+	draw_rect(Rect2(chest - Vector2(37, 25), Vector2(74, 56)), Color("765438"))
+	draw_rect(Rect2(chest - Vector2(37, 25), Vector2(74, 22)), Color("b38855"))
+	draw_rect(Rect2(chest - Vector2(37, 25), Vector2(74, 56)), GOLD.darkened(0.3), false, 3)
+	for offset in [-22, 22]:
+		draw_line(chest + Vector2(offset, -25), chest + Vector2(offset, 31), GOLD.darkened(0.2), 5)
+	draw_rect(Rect2(chest + Vector2(-6, -7), Vector2(12, 16)), GOLD)
+	label_at(chest + Vector2(-29, -54), "STASH", 18, GOLD)
+	# Animated warp gate and its stone pillars.
+	var gate := GATE_POS
+	draw_circle(gate, 78, Color(0.3, 0.7, 1, 0.06))
+	draw_circle(gate, 51, Color("1b4056"))
+	draw_arc(gate, 57, 0, TAU, 60, Color("82b5ff"), 5, true)
+	draw_arc(gate, 43, town_clock, town_clock + PI * 1.6, 40, MINT, 2, true)
+	for side in [-1, 1]:
+		draw_rect(Rect2(gate + Vector2(side * 70 - 10, -48), Vector2(20, 96)), Color("526177"))
+		draw_line(gate + Vector2(side * 70, -33), gate + Vector2(side * 70, 28), MINT, 3)
+	label_at(gate + Vector2(-51, -82), "WARP GATE", 18, MINT)
+	draw_player()
+	if panel.is_empty():
+		if player.distance_to(STASH_POS) <= 110:
+			label_at(chest + Vector2(-66, 67), "[E] OPEN STASH", 16, GOLD)
+		elif player.distance_to(GATE_POS) <= 110:
+			label_at(gate + Vector2(-84, 92), "[E] CHOOSE A MAP", 16, MINT)
+	draw_set_transform(Vector2.ZERO)
+	label_at(Vector2(58, 142), "HUNTER'S REST", 20, PALE)
+	label_at(Vector2(58, 167), "A quiet place between expeditions", 13, MUTED)
+
+func draw_panel() -> void:
+	draw_rect(Rect2(0, 108, 1152, 540), Color(0.015, 0.025, 0.045, 0.82))
+	draw_rect(Rect2(115, 140, 922, 480), Color("121d2a"))
+	draw_rect(Rect2(115, 140, 922, 480), Color("506172"), false, 2)
+	draw_rect(CLOSE_RECT, Color("293746"))
+	label_at(CLOSE_RECT.position + Vector2(13, 23), "X", 19, PALE)
+	if panel == "gate":
+		label_at(Vector2(144, 186), "WAYPOINT / SELECT A DESTINATION", 24, MINT)
+		label_at(Vector2(144, 222), "Defeat a map boss to unlock the next destination.", 16, MUTED)
+		for i in range(3):
+			var rect := map_rect(i)
+			var available: bool = i < profile.unlocked
+			draw_rect(rect, MAPS[i].color if available else Color("171c25"))
+			draw_rect(rect, MINT if available and rect.has_point(get_global_mouse_position()) else Color("354355"), false, 2)
+			label_at(rect.position + Vector2(16, 30), "0%d / ITEM TIER %d" % [i + 1, i + 1], 13, MUTED)
+			label_at(rect.position + Vector2(16, 64), MAPS[i].name, 18, PALE if available else MUTED)
+			label_at(rect.position + Vector2(16, 98), MAPS[i].boss, 15, GOLD)
+			label_at(rect.position + Vector2(16, 143), "TRAVEL / CLICK OR %d" % (i + 1) if available else "LOCKED / CLEAR PREVIOUS MAP", 13, MINT if available else MUTED)
+		label_at(Vector2(144, 574), "Esc / E to close", 15, MUTED)
+		return
+	label_at(Vector2(144, 179), "STASH & INVENTORY" if panel == "stash" else "INVENTORY", 23, GOLD)
+	label_at(Vector2(160, 208), "EQUIPPED", 12, MUTED)
 	for i in range(3):
-		var rect := map_rect(i)
-		var available: bool = i < profile.unlocked
-		draw_rect(rect, MAPS[i].color if available else Color("171c25"))
-		draw_rect(rect, MINT if available and rect.has_point(get_global_mouse_position()) else Color("354355"), false, 1)
-		label_at(rect.position + Vector2(18, 29), "%02d / %s" % [i + 1, MAPS[i].name], 18, PALE if available else MUTED)
-		label_at(rect.position + Vector2(18, 60), "Item tier %d  /  %s" % [i + 1, MAPS[i].boss], 14, MUTED)
-		label_at(rect.position + Vector2(18, 104), "CLICK TO TRAVEL / %d" % (i + 1) if available else "Defeat the previous map boss to unlock", 14, MINT if available else MUTED)
-	label_at(Vector2(44, 312), "EQUIPPED / PERMANENT CHARACTER", 16, MINT)
+		var item: Dictionary = profile.equipment[Profile.SLOTS[i]]
+		draw_item_cell(equipment_rect(i), item)
+		label_at(equipment_rect(i).position + Vector2(0, 62), Profile.SLOTS[i].to_upper(), 11, MUTED)
+	label_at(Vector2(160, 306), "BACKPACK", 14, MINT)
+	draw_grid(false)
+	if panel == "stash":
+		label_at(Vector2(612, 306), "PERSONAL STASH", 14, GOLD)
+		draw_grid(true)
+		label_at(Vector2(612, 245), "Click stored gear to take it out.", 15, PALE)
+		label_at(Vector2(612, 271), "Shift-click backpack gear to store it.", 14, MUTED)
+	else:
+		label_at(Vector2(612, 269), "CHARACTER / LEVEL %d" % profile.level, 20, MINT)
+		label_at(Vector2(612, 316), "Attack damage       %d" % damage, 18)
+		label_at(Vector2(612, 350), "Maximum health      %d" % max_hp, 18)
+		label_at(Vector2(612, 384), "Defense             %d" % armor, 18)
+		label_at(Vector2(612, 418), "Attack interval     %.2fs" % attack_interval, 18)
+		label_at(Vector2(612, 480), "Visit the stash in town to store gear.", 15, MUTED)
+	label_at(Vector2(144, 598), "Hover: details & comparison  /  Click: equip  /  I or Esc: close" if hub else "Hover: details & comparison  /  Equip in town  /  I or Esc: close  /  World paused", 14, MUTED)
+	var hovered := hovered_item(get_global_mouse_position())
+	if not hovered.is_empty():
+		draw_item_tooltip(hovered.item, hovered.equipped, hovered.storage)
+
+func draw_grid(storage: bool) -> void:
+	var items: Array[Dictionary] = profile.stash if storage else profile.inventory
+	var current_page := stash_page if storage else page
+	for cell in range(GRID_PAGE_SIZE):
+		var index := current_page * GRID_PAGE_SIZE + cell
+		draw_item_cell(grid_rect(cell, storage), items[index] if index < items.size() else {})
+	var origin := Vector2(612 if storage else 160, 559)
+	label_at(origin, "%d ITEMS / %d" % [items.size(), current_page + 1], 12, MUTED)
+	for next in [false, true]:
+		var rect := page_rect(storage, next)
+		draw_rect(rect, Color("293746"))
+		label_at(rect.position + Vector2(8, 18), "NEXT >" if next else "< PREV", 11, MINT)
+
+func draw_item_cell(rect: Rect2, item: Dictionary) -> void:
+	var hover := rect.has_point(get_global_mouse_position())
+	draw_rect(rect, Color("263f4b") if hover else Color("0c1420"))
+	draw_rect(rect, rarity_color(item).darkened(0.35) if not item.is_empty() else Color("304052"), false, 1)
+	if item.is_empty():
+		return
+	var c := rect.get_center()
+	var color := rarity_color(item)
+	match item.slot:
+		"weapon":
+			draw_line(c + Vector2(-10, 12), c + Vector2(13, -14), color, 5, true)
+			draw_line(c + Vector2(-13, 2), c + Vector2(0, 14), GOLD, 3, true)
+		"armor":
+			draw_colored_polygon(PackedVector2Array([c + Vector2(-9, -15), c + Vector2(-18, -5), c + Vector2(-11, 0), c + Vector2(-11, 14), c + Vector2(11, 14), c + Vector2(11, 0), c + Vector2(18, -5), c + Vector2(9, -15), c + Vector2(0, -9)]), color)
+		"charm":
+			draw_arc(c - Vector2(0, 5), 11, 0, TAU, 24, GOLD, 2, true)
+			draw_colored_polygon(PackedVector2Array([c + Vector2(0, -3), c + Vector2(8, 7), c + Vector2(0, 17), c + Vector2(-8, 7)]), color)
+	label_at(rect.position + Vector2(3, 11), str(int(item.tier)), 10, color)
+
+func hovered_item(mouse: Vector2) -> Dictionary:
 	for i in range(3):
-		var slot: String = Profile.SLOTS[i]
-		var item: Dictionary = profile.equipment[slot]
-		var origin := Vector2(44, 330 + i * 87)
-		draw_rect(Rect2(origin, Vector2(400, 77)), Color("172231"))
-		label_at(origin + Vector2(14, 20), slot.to_upper(), 12, MUTED)
-		label_at(origin + Vector2(14, 43), item.get("name", "None"), 17, rarity_color(item) if not item.is_empty() else MUTED)
-		label_at(origin + Vector2(14, 64), item_stats(item), 13)
-	label_at(Vector2(44, 626), "ATK %.0f / HP %.0f / DEF %.0f / %.2fs" % [damage, max_hp, armor, attack_interval], 17, GOLD)
-	label_at(Vector2(470, 312), "STASH / CLICK AN ITEM TO EQUIP", 16, MINT)
-	for row in range(6):
-		var index := page * 6 + row
-		if index >= profile.inventory.size():
-			break
-		var item: Dictionary = profile.inventory[index]
-		var rect := item_rect(row)
-		var hover := rect.has_point(get_global_mouse_position())
-		draw_rect(rect, Color("29414a") if hover else Color("172231"))
-		label_at(rect.position + Vector2(12, 18), "%s [%s T%d]" % [item.name, Profile.RARITIES[int(item.rarity)], item.tier], 15, rarity_color(item))
-		label_at(rect.position + Vector2(12, 35), item_stats(item), 12)
-		if hover:
-			var current: Dictionary = profile.equipment[item.slot]
-			label_at(Vector2(470, 640), "CHANGE: ATK %+d / HP %+d / DEF %+d / SPD %+d%%" % [item.attack - current.get("attack", 0), item.health - current.get("health", 0), item.armor - current.get("armor", 0), item.haste - current.get("haste", 0)], 13, GOLD)
-	if profile.inventory.is_empty():
-		label_at(Vector2(488, 371), "Your stash is empty. Find equipment on expeditions.", 17, MUTED)
-	label_at(Vector2(470, 624), "%d ITEMS / PAGE %d" % [profile.inventory.size(), page + 1], 12, MUTED)
-	label_at(Vector2(960, 635), "< PREV", 14, MINT)
-	label_at(Vector2(1035, 635), "NEXT >", 14, MINT)
+		var item: Dictionary = profile.equipment[Profile.SLOTS[i]]
+		if equipment_rect(i).has_point(mouse) and not item.is_empty():
+			return {"item": item, "equipped": true, "storage": false}
+	for storage in [false, true]:
+		if storage and panel != "stash":
+			continue
+		var items: Array[Dictionary] = profile.stash if storage else profile.inventory
+		for cell in range(GRID_PAGE_SIZE):
+			var index := (stash_page if storage else page) * GRID_PAGE_SIZE + cell
+			if grid_rect(cell, storage).has_point(mouse) and index < items.size():
+				return {"item": items[index], "equipped": false, "storage": storage}
+	return {}
+
+func tooltip_rect(mouse: Vector2) -> Rect2:
+	var origin := mouse + Vector2(20, 18)
+	if origin.x + 350 > 1140:
+		origin.x = mouse.x - 370
+	origin.y = minf(origin.y, 704 - 260)
+	return Rect2(origin.clamp(Vector2(12, 12), Vector2(790, 444)), Vector2(350, 260))
+
+func draw_item_tooltip(item: Dictionary, equipped: bool, storage: bool) -> void:
+	var rect := tooltip_rect(get_global_mouse_position())
+	draw_rect(Rect2(rect.position + Vector2(5, 5), rect.size), Color(0, 0, 0, 0.5))
+	draw_rect(rect, Color("0c1420"))
+	draw_rect(rect, rarity_color(item), false, 2)
+	var p := rect.position + Vector2(16, 27)
+	label_at(p, item.name, 19, rarity_color(item))
+	label_at(p + Vector2(0, 26), "%s / %s / TIER %d" % [Profile.RARITIES[int(item.rarity)], item.slot.to_upper(), item.tier], 13, MUTED)
+	draw_line(p + Vector2(0, 41), p + Vector2(316, 41), Color("304052"))
+	var current: Dictionary = profile.equipment[item.slot]
+	var keys := ["attack", "health", "armor", "haste"]
+	var names := ["Attack damage", "Maximum health", "Defense", "Attack speed %"]
+	for i in range(4):
+		var key: String = keys[i]
+		var delta := int(item[key]) - int(current.get(key, 0))
+		label_at(p + Vector2(0, 67 + i * 26), "%s: %d" % [names[i], item[key]], 16)
+		if not equipped:
+			label_at(p + Vector2(261, 67 + i * 26), "%+d" % delta, 16, MINT if delta > 0 else (RED if delta < 0 else MUTED))
+	label_at(p + Vector2(0, 178), "Currently equipped" if equipped else "Compared with: " + current.get("name", "Empty slot"), 12, MUTED)
+	var hint := "Equipped"
+	if not equipped:
+		hint = "Click to take out" if storage else ("Click to equip" if hub else "Equip after returning to town")
+		if panel == "stash" and not storage:
+			hint += " / Shift-click to store"
+	label_at(p + Vector2(0, 214), hint, 13, GOLD)
 
 func draw_world() -> void:
 	draw_set_transform(VIEW.position - camera)
@@ -416,14 +667,7 @@ func draw_world() -> void:
 		var color: Color = particle.color
 		color.a = minf(1, particle.life * 4)
 		draw_circle(particle.pos, 2.5, color)
-	draw_circle(player + Vector2(0, 10), 19, Color(0, 0, 0, 0.3))
-	var player_color := Color.WHITE if invincible > 0 and int(invincible * 24) % 2 == 0 else MINT
-	draw_colored_polygon(PackedVector2Array([player + Vector2(-14, 14), player + Vector2(-11, -9), player + Vector2(0, -18), player + Vector2(11, -9), player + Vector2(14, 14)]), player_color)
-	draw_rect(Rect2(player + Vector2(-8, -7), Vector2(16, 8)), Color("101926"))
-	draw_line(player + Vector2(-5, -3), player + Vector2(5, -3), GOLD, 2)
-	var hand := player + facing * 21
-	draw_line(hand - facing.orthogonal() * 6, hand + facing.orthogonal() * 6, GOLD, 3, true)
-	draw_line(hand, player + facing * 47, PALE, 5, true)
+	draw_player()
 	if slash > 0:
 		draw_arc(player, 94, slash_angle - 1.2, slash_angle + 1.2, 28, Color(0.44, 0.94, 0.82, slash / 0.16), 7, true)
 	if return_time > 0:
@@ -451,10 +695,10 @@ func draw_hud() -> void:
 	bar(Rect2(340, 41, 240, 9), hp / max_hp, RED)
 	label_at(Vector2(624, 29), "LEVEL %d / XP %d OF %d" % [profile.level, profile.xp, profile.xp_needed()], 13, MINT)
 	bar(Rect2(624, 41, 235, 5), float(profile.xp) / profile.xp_needed(), MINT)
-	label_at(Vector2(920, 32), "%d ITEMS OWNED" % profile.inventory.size(), 14, GOLD)
+	label_at(Vector2(920, 32), "BAG %d / STASH %d" % [profile.inventory.size(), profile.stash.size()], 14, GOLD)
 	label_at(Vector2(920, 58), "MAPS %d / 3" % profile.unlocked if hub else "POTIONS %d / 3 [Q]" % potions, 13, MUTED)
 	label_at(Vector2(30, 93), message, 15, MINT)
-	label_at(Vector2(30, 683), "Select map: click / 1-3     |     Equip: click stash item     |     Pages: wheel / arrows" if hub else "WASD Move  /  Mouse Aim  /  LMB or Space Attack  /  Shift Dodge  /  E Loot  /  Q Heal  /  T Town  /  Esc Pause", 14, MUTED)
+	label_at(Vector2(30, 683), "WASD Move  /  E Interact nearby  /  I Inventory  /  Esc Pause" if hub else "WASD Move  /  Mouse Aim  /  LMB or Space Attack  /  Shift Dodge  /  E Loot  /  Q Heal  /  T Town  /  I Bag  /  Esc Pause", 14, MUTED)
 
 func draw_overlay(title: String, subtitle: String) -> void:
 	draw_rect(Rect2(0, 0, 1152, 720), Color(0.025, 0.04, 0.065, 0.93))
@@ -479,3 +723,13 @@ func draw_enemy(enemy: Dictionary) -> void:
 	draw_line(pos + Vector2(2, 1), pos + Vector2(7, -2), PALE, 2)
 	if enemy.hp < enemy.max_hp:
 		bar(Rect2(pos + Vector2(-18, -radius - 9), Vector2(36, 3)), enemy.hp / enemy.max_hp, RED)
+
+func draw_player() -> void:
+	draw_circle(player + Vector2(0, 10), 19, Color(0, 0, 0, 0.3))
+	var player_color := Color.WHITE if invincible > 0 and int(invincible * 24) % 2 == 0 else MINT
+	draw_colored_polygon(PackedVector2Array([player + Vector2(-14, 14), player + Vector2(-11, -9), player + Vector2(0, -18), player + Vector2(11, -9), player + Vector2(14, 14)]), player_color)
+	draw_rect(Rect2(player + Vector2(-8, -7), Vector2(16, 8)), Color("101926"))
+	draw_line(player + Vector2(-5, -3), player + Vector2(5, -3), GOLD, 2)
+	var hand := player + facing * 21
+	draw_line(hand - facing.orthogonal() * 6, hand + facing.orthogonal() * 6, GOLD, 3, true)
+	draw_line(hand, player + facing * 47, PALE, 5, true)

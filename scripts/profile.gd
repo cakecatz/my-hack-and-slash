@@ -3,8 +3,10 @@ extends RefCounted
 
 const Skills = preload("res://scripts/skill_catalog.gd")
 
+const Effects = preload("res://scripts/item_effects.gd")
+
 const SAVE_PATH := "user://character.json"
-const RARITIES := ["Common", "Magic", "Rare"]
+const RARITIES := ["Common", "Magic", "Rare", "Relic"]
 const SLOTS := ["weapon", "armor", "charm"]
 var inventory: Array[Dictionary] = []
 var stash: Array[Dictionary] = []
@@ -31,6 +33,7 @@ var talents: Array[int] = [0, 0, 0]
 var play_seconds := 0.0
 # 0: manual, 1: auto pickup, 2: auto pickup and salvage Common drops.
 var loot_mode := 1
+var relic_hunts: Array[int] = [0, 0, 0]
 const LOOT_MODES := ["MANUAL", "AUTO", "AUTO + SCRAP"]
 const STANCES := ["CLEAVE", "NOVA", "LANCE"]
 const SUPPORTS := ["POWER", "ECHO", "SIPHON"]
@@ -160,10 +163,44 @@ func complete_mission(mission: int) -> bool:
 	unlocked = mini(3, 1 + campaign / 3)
 	embers += 12 + campaign * 2
 	if campaign % 3 == 0:
-		var relic := roll_item(campaign / 3, true)
-		relic.name = ["Warden's Oath", "Sentinel's Memory", "Tyrant's Last Ember"][campaign / 3 - 1]
-		relic.rune = stance
-		inventory.append(relic)
+		inventory.append(make_relic(campaign / 3 - 1, campaign / 3))
+	return true
+
+func effect_count(id: String) -> int:
+	var count := 0
+	for item in equipment.values():
+		if item.get("affix", "") == id:
+			count += 1
+	return count
+
+func has_relic(id: String) -> bool:
+	for item in equipment.values():
+		if item.get("relic", "") == id:
+			return true
+	return false
+
+func make_relic(index: int, tier: int) -> Dictionary:
+	var definition: Dictionary = Effects.RELICS[index]
+	var item := roll_item(clampi(tier, 1, 9), true, definition.slot)
+	item.erase("affix")
+	item.name = definition.name
+	item.rarity = 3
+	item.relic = definition.id
+	item.rune = definition.skill
+	item.favorite = true
+	# A special behavior trades away some of the raw stats of a comparable Rare.
+	item.attack = int(item.attack * 0.8)
+	item.health = int(item.health * 0.85)
+	return item
+
+func record_relic_hunt(chapter: int, tier: int) -> bool:
+	if chapter < 0 or chapter >= 3 or campaign < (chapter + 1) * 3:
+		return false
+	relic_hunts[chapter] += 1
+	if relic_hunts[chapter] < 3:
+		return false
+	relic_hunts[chapter] = 0
+	inventory.append(make_relic(chapter, tier))
 	return true
 
 func stats() -> Dictionary:
@@ -206,7 +243,8 @@ func roll_item(tier: int, boss: bool = false, target_slot: String = "") -> Dicti
 			item.name = "Ember charm"
 	if rarity >= 1:
 		item.health += randi_range(5, 12) * tier
-		item.name = "Stalwart " + item.name
+		item.affix = Effects.AFFIXES.keys().pick_random()
+		item.name = Effects.AFFIXES[item.affix].name + " " + item.name
 	if rarity == 2:
 		item.attack += tier * 3
 		item.haste += 4
@@ -237,7 +275,7 @@ func save_to(path: String = SAVE_PATH) -> bool:
 	if file == null:
 		save_error = "Save failed. Progress is in memory only."
 		return false
-	file.store_string(JSON.stringify({"version": 5, "loot_mode": loot_mode, "skill_levels": skill_levels, "skill_xp": skill_xp, "support_levels": support_levels, "support_xp": support_xp, "campaign": campaign, "depth": depth, "abyss_complete": abyss_complete, "embers": embers, "stance": stance, "support": support, "talents": talents, "play_seconds": play_seconds, "inventory": inventory, "stash": stash, "equipment": equipment, "level": level, "xp": xp, "unlocked": unlocked}))
+	file.store_string(JSON.stringify({"version": 6, "relic_hunts": relic_hunts, "loot_mode": loot_mode, "skill_levels": skill_levels, "skill_xp": skill_xp, "support_levels": support_levels, "support_xp": support_xp, "campaign": campaign, "depth": depth, "abyss_complete": abyss_complete, "embers": embers, "stance": stance, "support": support, "talents": talents, "play_seconds": play_seconds, "inventory": inventory, "stash": stash, "equipment": equipment, "level": level, "xp": xp, "unlocked": unlocked}))
 	file.flush()
 	var write_error := file.get_error()
 	file.close()
@@ -260,7 +298,17 @@ func valid_item(item: Variant) -> bool:
 	for key in ["rune", "upgrade"]:
 		if item.has(key) and (not (item[key] is float or item[key] is int) or item[key] != int(item[key])):
 			return false
-	return item.rarity <= 2 and item.tier >= 1 and item.tier <= 9 and int(item.get("rune", -1)) in [-1, 0, 1, 2] and int(item.get("upgrade", 0)) in [0, 1, 2, 3]
+	if item.has("affix") and (not item.affix is String or not Effects.AFFIXES.has(item.affix)):
+		return false
+	if item.has("relic"):
+		if not item.relic is String:
+			return false
+		var index := Effects.relic_index(item.relic)
+		if index < 0 or item.slot != Effects.RELICS[index].slot or item.rarity != 3:
+			return false
+	elif item.rarity == 3:
+		return false
+	return item.rarity <= 3 and item.tier >= 1 and item.tier <= 9 and int(item.get("rune", -1)) in [-1, 0, 1, 2] and int(item.get("upgrade", 0)) in [0, 1, 2, 3]
 
 func load_from(path: String = SAVE_PATH) -> bool:
 	if not FileAccess.file_exists(path):
@@ -269,7 +317,7 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	if file == null:
 		return false
 	var data: Variant = JSON.parse_string(file.get_as_text())
-	if not data is Dictionary or (data.get("version") != 1 and data.get("version") != 2 and data.get("version") != 3 and data.get("version") != 4 and data.get("version") != 5):
+	if not data is Dictionary or (data.get("version") != 1 and data.get("version") != 2 and data.get("version") != 3 and data.get("version") != 4 and data.get("version") != 5 and data.get("version") != 6):
 		return false
 	if not data.get("inventory") is Array or not data.get("equipment") is Dictionary:
 		return false
@@ -330,10 +378,16 @@ func load_from(path: String = SAVE_PATH) -> bool:
 					return false
 				if kind == "support" and i > 0 and data.campaign < 3 and (levels[i] != 1 or experience[i] != 0):
 					return false
-	if data.version == 5:
+	if data.version >= 5:
 		var saved_mode: Variant = data.get("loot_mode")
 		if not (saved_mode is int or saved_mode is float) or saved_mode != int(saved_mode) or not int(saved_mode) in [0, 1, 2]:
 			return false
+	if data.version == 6:
+		if not data.get("relic_hunts") is Array or data.relic_hunts.size() != 3:
+			return false
+		for value in data.relic_hunts:
+			if not (value is int or value is float) or value != int(value) or value < 0 or value > 2:
+				return false
 	# JSON numbers are floats; normalize equipment values before using them.
 	var restored: Array[Dictionary] = []
 	for item in data.inventory:
@@ -355,7 +409,8 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	support = int(data.get("support", 0))
 	talents.assign(data.get("talents", [0, 0, 0]))
 	play_seconds = float(data.get("play_seconds", 0))
-	loot_mode = int(data.loot_mode) if data.version == 5 else 1
+	loot_mode = int(data.loot_mode) if data.version >= 5 else 1
+	relic_hunts.assign(data.relic_hunts if data.version == 6 else [0, 0, 0])
 	skill_levels.assign(data.skill_levels if data.version >= 4 else [1, 1, 1])
 	skill_xp.assign(data.skill_xp if data.version >= 4 else [0, 0, 0])
 	support_levels.assign(data.support_levels if data.version >= 4 else [1, 1, 1])

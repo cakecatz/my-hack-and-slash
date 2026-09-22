@@ -1,7 +1,12 @@
 extends Node2D
 
+const Shrine = preload("res://scripts/expedition_shrine.gd")
+const Layout = preload("res://scripts/expedition_layout.gd")
+const Feedback = preload("res://scripts/combat_feedback.gd")
 const Profile = preload("res://scripts/profile.gd")
 const Skills = preload("res://scripts/skill_catalog.gd")
+const BossFight = preload("res://scripts/boss_fight.gd")
+const Effects = preload("res://scripts/item_effects.gd")
 const ExpeditionEvent = preload("res://scripts/expedition_event.gd")
 const VIEW := Rect2(24, 108, 1104, 540)
 const WORLD := Rect2(0, 0, 2400, 1500)
@@ -27,16 +32,28 @@ const JOURNEYS := [
 	"Voices Below", "The Silent Procession", "The Second Seal",
 	"Road of Cinders", "The Broken Crown", "The Last Flame"
 ]
+var feedback = Feedback.new()
+var settings_previous_panel := ""
+var settings_previous_paused := false
+var settings_message := ""
 var selected_depth := 0
 var mission := 0
 var abyss := false
 var run_depth := 0
 var contract := 0
-var seal_required := 0
+var seal_required := 0 # Remaining defenders of the two main-route seals.
+var seal_guards: Array[int] = [0, 0]
+var layout = Layout.new()
 var heat := 0.0
+var cleave_chain := 0
+var wave_flash := 0.0
+var pull_flash := 0.0
 var hazards: Array[Dictionary] = []
+var boss_stones: Array[Dictionary] = []
+var next_boss_id := 0
 var celebration := ""
 var trial = ExpeditionEvent.new()
+var shrine = Shrine.new()
 var scrapped := 0
 var profile = Profile.new()
 var save_enabled := true
@@ -81,6 +98,9 @@ var notices: Array[Dictionary] = []
 var font: Font = ThemeDB.fallback_font
 
 func _ready() -> void:
+	add_child(feedback)
+	if save_enabled:
+		feedback.load_settings()
 	if save_enabled:
 		if FileAccess.file_exists(Profile.SAVE_PATH) and not profile.load_from():
 			# Preserve unreadable saves rather than overwriting them automatically.
@@ -129,6 +149,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			else:
 				paused = not paused
 			return
+		if event.keycode == KEY_F10:
+			toggle_settings()
+			return
+		if panel == "settings":
+			return
 		if paused:
 			return
 		if event.keycode == KEY_L:
@@ -153,6 +178,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		if not panel.is_empty():
 			if event.keycode == KEY_E:
 				close_panel()
+			elif panel == "shrine" and event.keycode >= KEY_1 and event.keycode <= KEY_3:
+				choose_shrine(event.keycode - KEY_1)
 			elif panel == "trial" and event.keycode >= KEY_1 and event.keycode <= KEY_3:
 				start_trial(event.keycode - KEY_1)
 			elif panel == "gate" and event.keycode == KEY_4:
@@ -172,15 +199,58 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.keycode == KEY_F:
 			ember_burst()
 		elif event.keycode == KEY_Q:
-			if potions > 0 and hp < max_hp:
-				potions -= 1
-				hp = minf(max_hp, hp + max_hp * 0.5)
+			use_potion()
 	if event is InputEventMouseButton and event.pressed and not paused and not ended and celebration.is_empty():
 		panel_mouse(event.position, event.button_index, event.shift_pressed)
 
 func close_panel() -> void:
+	if panel == "settings":
+		panel = settings_previous_panel
+		paused = settings_previous_paused
+		attack_blocked = true
+		return
 	panel = ""
 	attack_blocked = true
+
+func toggle_settings() -> void:
+	if panel == "settings":
+		close_panel()
+		return
+	settings_previous_panel = panel
+	settings_previous_paused = paused
+	paused = false
+	panel = "settings"
+	return_time = 0
+	feedback.reset()
+
+func settings_rect(index: int) -> Rect2:
+	return Rect2(640, 240 + index * 68, 310, 42)
+
+func settings_click(mouse: Vector2) -> void:
+	for i in range(4):
+		if not settings_rect(i).has_point(mouse):
+			continue
+		match i:
+			0:
+				feedback.set_volume(0.0 if feedback.volume >= 0.99 else snappedf(feedback.volume + 0.2, 0.2))
+			1: feedback.shake_enabled = not feedback.shake_enabled
+			2: feedback.hitstop_enabled = not feedback.hitstop_enabled
+			3: feedback.flash_enabled = not feedback.flash_enabled
+		feedback.reset()
+		feedback.play("loot")
+		if save_enabled and feedback.save_settings() != OK:
+			settings_message = "Could not save preferences. Applied for this session."
+
+func draw_settings() -> void:
+	label_at(Vector2(150, 190), "SOUND & COMBAT FEEDBACK", 24, MINT)
+	label_at(Vector2(150, 218), "World paused. F10 / Esc: return. Click to change.", 16, MUTED)
+	var titles := ["Effects volume", "Camera shake", "Heavy-hit pause (45 ms)", "Hit flashes"]
+	var values := ["%d%% / CLICK +20%%" % roundi(feedback.volume * 100), "ON" if feedback.shake_enabled else "OFF", "ON" if feedback.hitstop_enabled else "OFF", "ON" if feedback.flash_enabled else "OFF"]
+	for i in range(4):
+		label_at(Vector2(160, 267 + i * 68), titles[i], 20, PALE)
+		ui_button(settings_rect(i), values[i], true)
+	label_at(Vector2(160, 550), "Heavy impacts only. Aim and HUD stay steady. No full-screen flashes.", 16, MUTED)
+	label_at(Vector2(160, 584), settings_message if feedback.settings_writable else "Unreadable preferences preserved; changes apply for this session.", 14, GOLD)
 
 func interact_hub() -> void:
 	if not hub or not panel.is_empty():
@@ -225,6 +295,16 @@ func panel_mouse(mouse: Vector2, button: int, shift: bool) -> void:
 		return
 	if button == MOUSE_BUTTON_LEFT and CLOSE_RECT.has_point(mouse):
 		close_panel()
+		return
+	if panel == "settings":
+		if button == MOUSE_BUTTON_LEFT:
+			settings_click(mouse)
+		return
+	if panel == "shrine":
+		if button == MOUSE_BUTTON_LEFT:
+			for i in range(3):
+				if shrine_card(i).has_point(mouse):
+					choose_shrine(i)
 		return
 	if panel == "trial":
 		if button == MOUSE_BUTTON_LEFT:
@@ -308,9 +388,14 @@ func enter_map(index: int, as_abyss: bool = false) -> bool:
 	run_depth = (profile.depth if selected_depth == 0 else clampi(selected_depth, 1, profile.depth)) if abyss else 0
 	mission = mini(profile.campaign, index * 3 + 2) if not abyss else 9
 	heat = 0
+	cleave_chain = 0
+	wave_flash = 0
+	pull_flash = 0
 	mastery_time = 0
 	hazards.clear()
+	boss_stones.clear()
 	celebration = ""
+	feedback.reset()
 	hub = false
 	panel = ""
 	attack_blocked = true
@@ -322,6 +407,10 @@ func enter_map(index: int, as_abyss: bool = false) -> bool:
 	found = 0
 	scrapped = 0
 	trial.reset()
+	shrine.reset()
+	layout.build(index, mission % 3)
+	trial.position = layout.cache
+	seal_guards.assign([0, 0])
 	potions = 3
 	return_time = 0
 	attack_cooldown = 0.25
@@ -337,17 +426,19 @@ func enter_map(index: int, as_abyss: bool = false) -> bool:
 	particles.clear()
 	notices.clear()
 	var pack_count := 10 + (mission % 3) * 2 + (2 if abyss else 0)
+	var centers := [Vector2(600, 760), Vector2(860, 520), Vector2(1060, 780), Vector2(1180, 540), Vector2(1400, 520), Vector2(1500, 780), Vector2(1620, 1000), Vector2(940, layout.cache.y), Vector2(1140, layout.cache.y), Vector2(1840, 1000)]
 	for pack in range(pack_count):
-		var center := Vector2(470 + (pack % 5) * 330, 300 + (pack / 5) * 380)
-		if mission % 3 == 1:
-			center.y = 1500 - center.y
-		center += Vector2(randf_range(-55, 55), randf_range(-55, 55))
+		var group := pack % centers.size()
+		var seal := 0 if group in [1, 2, 3] else (1 if group in [4, 5, 6] else -1)
 		for unit in range(5 + index):
-			spawn_enemy(center + Vector2(randf_range(-90, 90), randf_range(-90, 90)))
-	seal_required = int(enemies.size() * 0.7)
+			spawn_enemy(centers[group] + Vector2(randf_range(-65, 65), randf_range(-65, 65)))
+			enemies[-1].seal_guard = seal
+			if seal >= 0:
+				seal_guards[seal] += 1
+	seal_required = seal_guards[0] + seal_guards[1]
 	spawn_enemy(Vector2(2130, 750), true)
 	update_camera()
-	message = "Break the seal: defeat %d enemies, then hunt %s." % [seal_required, MAPS[index].boss]
+	message = "MAIN ROUTE / Break two guarded seals, then hunt %s. Purple vault: optional loot." % MAPS[index].boss
 	return true
 
 func enter_abyss() -> bool:
@@ -365,17 +456,25 @@ func spawn_enemy(pos: Vector2, boss: bool = false) -> void:
 	var health := (48.0 + tier * 24) * (12 if boss else (2 if kind == 2 else 1)) * scale
 	if abyss and contract == 2:
 		health *= 1.4
+	health *= shrine.multiplier("health")
 	var speed := 65.0 if boss else (72.0 if kind == 1 else 92.0)
 	if abyss and contract == 1:
 		speed *= 1.35
 	var hit := (8.0 + tier * 4) * (2 if boss else 1) * (1 + run_depth * 0.13)
 	if abyss and contract == 2:
 		hit *= 1.2
-	enemies.append({"pos": pos, "hp": health, "max_hp": health, "radius": 32.0 if boss else (21.0 if kind == 2 else 16.0), "speed": speed, "damage": hit, "flash": 0.0, "brute": boss, "aggro": false, "kind": kind, "skill_cd": randf_range(1.0, 2.8)})
+	pos = layout.safe_position(pos, 32 if boss else 21)
+	enemies.append({"pos": pos, "hp": health, "max_hp": health, "radius": 32.0 if boss else (21.0 if kind == 2 else 16.0), "speed": speed, "damage": hit, "flash": 0.0, "brute": boss, "aggro": false, "kind": kind, "skill_cd": randf_range(1.0, 2.8), "elite_mod": randi_range(0, 2) if kind == 2 else -1, "burn_time": 0.0, "burn_dps": 0.0, "slow_time": 0.0, "slow_factor": 1.0})
+	if boss:
+		next_boss_id += 1
+		BossFight.setup(enemies[-1], next_boss_id)
 
 func return_to_hub(defeated: bool = false) -> void:
+	shrine.reset()
+	feedback.reset()
 	hub = true
 	hazards.clear()
+	boss_stones.clear()
 	celebration = ""
 	panel = ""
 	player = HUB_SPAWN
@@ -403,8 +502,9 @@ func pickup_nearby(automatic: bool = false) -> void:
 	var collected := 0
 	var recycled := 0
 	for i in range(drops.size() - 1, -1, -1):
-		if player.distance_to(drops[i].pos) <= 90:
+		if player.distance_to(drops[i].pos) <= 90 and layout.segment_clear(player, drops[i].pos):
 			if profile.collect_item(drops[i].item, automatic and profile.loot_mode == 2):
+				feedback.play("relic" if drops[i].item.rarity == 3 else "loot")
 				found += 1
 				collected += 1
 			else:
@@ -458,12 +558,16 @@ func interact_field() -> void:
 	if hub or ended or paused or not panel.is_empty():
 		return
 	pickup_nearby()
-	if trial.state == ExpeditionEvent.State.SEALED and player.distance_to(trial.position) <= 100:
+	if shrine_available() and player.distance_to(shrine.position) <= 100 and layout.segment_clear(player, shrine.position):
+		panel = "shrine"
+		return_time = 0
+		return
+	if trial.state == ExpeditionEvent.State.SEALED and player.distance_to(trial.position) <= 100 and layout.segment_clear(player, trial.position):
 		panel = "trial"
 		return_time = 0
 
 func start_trial(choice: int) -> bool:
-	if hub or ended or paused or panel != "trial" or choice < 0 or choice >= Profile.SLOTS.size() or player.distance_to(trial.position) > 100:
+	if hub or ended or paused or panel != "trial" or choice < 0 or choice >= Profile.SLOTS.size() or player.distance_to(trial.position) > 100 or not layout.segment_clear(player, trial.position):
 		return false
 	if not trial.start(Profile.SLOTS[choice]):
 		return false
@@ -484,6 +588,7 @@ func start_trial(choice: int) -> bool:
 	return true
 
 func finish_trial() -> void:
+	feedback.play("loot")
 	var reward: Dictionary = profile.roll_item(mini(9, loot_tier() + 1), true, trial.reward_slot)
 	reward.name = "Cachebound " + {"weapon": "Cleaver", "armor": "Mail", "charm": "Charm"}[trial.reward_slot]
 	reward.rune = profile.stance
@@ -501,8 +606,10 @@ func navigation_target() -> Dictionary:
 	var distance := INF
 	for enemy in enemies:
 		if enemy.brute:
-			if kills >= seal_required:
+			if seal_required == 0:
 				return enemy
+			continue
+		if int(enemy.get("seal_guard", -1)) < 0:
 			continue
 		var candidate: float = player.distance_squared_to(enemy.pos)
 		if candidate < distance:
@@ -511,12 +618,14 @@ func navigation_target() -> Dictionary:
 	return nearest
 
 func _process(delta: float) -> void:
+	var combat_delta: float = feedback.advance(delta)
 	if not paused and not ended and panel.is_empty() and celebration.is_empty():
 		profile.play_seconds += delta
 		if hub:
 			step_hub(delta)
 		else:
-			step(delta)
+			if combat_delta > 0:
+				step(combat_delta)
 	queue_redraw()
 
 func step_hub(delta: float) -> void:
@@ -536,6 +645,8 @@ func update_camera() -> void:
 	camera = (player - VIEW.size / 2).clamp(Vector2.ZERO, WORLD.size - VIEW.size)
 
 func step(delta: float) -> void:
+	wave_flash = maxf(0, wave_flash - delta)
+	pull_flash = maxf(0, pull_flash - delta)
 	mastery_time = maxf(0, mastery_time - delta)
 	attack_cooldown = maxf(0, attack_cooldown - delta)
 	slash = maxf(0, slash - delta)
@@ -552,10 +663,10 @@ func step(delta: float) -> void:
 		dash_cooldown = 1.1
 		invincible = 0.23
 	if dash_time > 0:
-		player += dash_direction * 820 * delta
+		player = layout.move_body(player, dash_direction * 820 * delta, 18)
 		burst(player, MINT, 2)
 	else:
-		player += movement * 245 * delta
+		player = layout.move_body(player, movement * 245 * delta, 18)
 	player = clamp_point(player, 18)
 	update_camera()
 	if not Input.is_action_pressed("attack"):
@@ -574,26 +685,30 @@ func step(delta: float) -> void:
 			if return_time <= 0:
 				return_to_hub()
 				return
+	update_enemy_statuses(delta)
+	if not celebration.is_empty():
+		return
 	for enemy in enemies:
-		if enemy.brute and kills < seal_required:
+		if enemy.brute and seal_required > 0:
+			continue
+		if enemy.brute:
+			BossFight.step(self, enemy, delta)
+			if ended:
+				return
 			continue
 		var distance: float = enemy.pos.distance_to(player)
-		if distance < 370:
+		var visible: bool = layout.segment_clear(enemy.pos, player)
+		if distance < 370 and visible:
 			enemy.aggro = true
 		if enemy.aggro:
-			if enemy.kind != 1 or distance > 240:
-				enemy.pos = clamp_point(enemy.pos.move_toward(player, enemy.speed * delta), enemy.radius)
+			if enemy.kind != 1 or distance > 240 or not visible:
+				enemy.pos = layout.chase(enemy.pos, player, enemy.radius, enemy.speed * enemy.slow_factor * (1.45 if enemy.elite_mod == 2 else 1.0) * delta)
 			enemy.skill_cd -= delta
-			if enemy.skill_cd <= 0 and (enemy.brute or enemy.kind == 1):
-				enemy.skill_cd = 2.8 if enemy.brute else 3.5
-				var target: Vector2 = enemy.pos if enemy.brute and map_index == 0 else player
-				var radius := 145.0 if enemy.brute else 62.0
-				add_hazard(target, radius, enemy.damage * 1.5, 1.0)
-				if enemy.brute and map_index == 2:
-					add_hazard(player + Vector2(150, 0), 105, enemy.damage, 1.35)
-					add_hazard(player - Vector2(150, 0), 105, enemy.damage, 1.65)
+			if enemy.skill_cd <= 0 and visible and distance <= 450 and (enemy.kind == 1 or enemy.elite_mod == 1):
+				enemy.skill_cd = 3.5
+				add_hazard(player, 82.0 if enemy.elite_mod == 1 else 62.0, enemy.damage * 1.5, 1.0)
 		enemy.flash = maxf(0, enemy.flash - delta)
-		if distance < enemy.radius + 16 and invincible <= 0:
+		if enemy.pos.distance_to(player) < enemy.radius + 16 and visible and invincible <= 0:
 			take_hit(enemy.damage)
 			if ended:
 				return
@@ -602,8 +717,9 @@ func step(delta: float) -> void:
 		if hazards[i].time <= 0:
 			var hazard: Dictionary = hazards[i]
 			hazards.remove_at(i)
-			burst(hazard.pos, RED, 20)
-			if player.distance_to(hazard.pos) <= hazard.radius + 16:
+			if not hazard.get("preview_only", false):
+				burst(hazard.pos, RED, 20)
+			if BossFight.contains(hazard, player) and layout.segment_clear(hazard.pos, player):
 				take_hit(hazard.damage)
 				if ended:
 					return
@@ -629,20 +745,28 @@ func add_hazard(pos: Vector2, radius: float, hit: float, delay: float) -> void:
 func take_hit(amount: float) -> void:
 	if invincible > 0 or ended:
 		return
-	var hit := maxf(1, amount * 100.0 / (100.0 + armor * 5))
+	var hit := maxf(1, amount * shrine.multiplier("incoming") * 100.0 / (100.0 + armor * 5))
 	hp = maxf(0, hp - hit)
 	invincible = 0.65
 	return_time = 0
+	feedback.play("hurt")
+	feedback.heavy(player, RED, 2.0)
 	burst(player, RED, 14)
 	notices.append({"pos": player - Vector2(0, 30), "text": "-%d" % hit, "life": 0.7, "color": RED})
 	if hp <= 0:
 		ended = true
+		shrine.reset()
 		persist()
 
 func hit_enemy(index: int, amount: float) -> bool:
 	var enemy: Dictionary = enemies[index]
-	if enemy.brute and kills < seal_required:
+	if enemy.brute and seal_required > 0:
 		return false
+	if enemy.brute:
+		amount *= BossFight.multiplier(self, enemy)
+	feedback.play("hit")
+	if notices.size() >= 96:
+		notices.pop_front()
 	enemy.hp -= amount
 	enemy.flash = 0.12
 	enemy.aggro = true
@@ -652,25 +776,89 @@ func hit_enemy(index: int, amount: float) -> bool:
 		defeat_enemy(index)
 	return true
 
+func update_enemy_statuses(delta: float) -> void:
+	for i in range(enemies.size() - 1, -1, -1):
+		var enemy: Dictionary = enemies[i]
+		enemy.slow_time = maxf(0, enemy.slow_time - delta)
+		if enemy.slow_time <= 0:
+			enemy.slow_factor = 1.0
+		if enemy.burn_time > 0:
+			var elapsed := minf(delta, enemy.burn_time)
+			enemy.burn_time = maxf(0, enemy.burn_time - delta)
+			if not enemy.brute or seal_required == 0:
+				enemy.hp -= enemy.burn_dps * elapsed * (BossFight.multiplier(self, enemy) if enemy.brute else 1.0)
+				if enemy.hp <= 0:
+					defeat_enemy(i)
+
+func apply_attack_hit(index: int, amount: float, scorch: int, frost: int) -> bool:
+	var enemy: Dictionary = enemies[index]
+	if enemy.brute and seal_required > 0:
+		return false
+	if scorch > 0:
+		var burning := amount * 0.2 * scorch
+		enemy.burn_dps = maxf(enemy.burn_dps, burning) if enemy.burn_time > 0 else burning
+		enemy.burn_time = 2.0
+	if frost > 0:
+		enemy.slow_time = 1.5
+		enemy.slow_factor = pow(0.85, frost)
+	return hit_enemy(index, amount)
+
+func attack_damage_at(offset: Vector2, radius: float, combat: Dictionary, wave_ready: bool, fork: bool) -> float:
+	if not layout.segment_clear(player, player + offset):
+		return 0.0
+	var hit := 0.0
+	if offset.length() <= combat.reach + radius:
+		if profile.stance == 1 or (profile.stance == 0 and (offset.length() <= 28 or facing.dot(offset.normalized()) >= 0.25)):
+			hit = combat.damage
+		elif profile.stance == 2:
+			if facing.dot(offset) >= 0 and absf(facing.cross(offset)) <= 24 + radius:
+				hit = combat.damage
+			elif fork:
+				for angle in [-22.0, 22.0]:
+					var ray := facing.rotated(deg_to_rad(angle))
+					if ray.dot(offset) >= 0 and absf(ray.cross(offset)) <= 24 + radius:
+						hit = combat.damage * 0.6
+	if wave_ready and offset.length() <= 300 + radius and facing.dot(offset) >= 0 and absf(facing.cross(offset)) <= 40 + radius:
+		hit = maxf(hit, combat.damage * 0.75)
+	return hit
+
 func attack() -> void:
-	var combat: Dictionary = profile.combat_stats()
+	feedback.play(["cleave", "nova", "lance"][profile.stance])
+	var combat: Dictionary = expedition_combat()
 	attack_cooldown = combat.interval
 	slash = 0.16
 	slash_angle = facing.angle()
 	var landed := false
+	var wave: bool = profile.stance == 0 and profile.has_relic("cleave_wave")
+	var fork: bool = profile.stance == 2 and profile.has_relic("lance_fork")
+	var pull: bool = profile.stance == 1 and profile.has_relic("nova_pull")
+	if not wave:
+		cleave_chain = 0
+	var wave_ready := wave and cleave_chain == 2
+	var scorch: int = profile.effect_count("scorch")
+	var frost: int = profile.effect_count("frost")
+	if pull:
+		pull_flash = 0.18
+		for enemy in enemies:
+			if not enemy.brute and player.distance_to(enemy.pos) <= 250 and layout.segment_clear(player, enemy.pos):
+				enemy.pos = layout.move_body(enemy.pos, enemy.pos.direction_to(player) * minf(90, enemy.pos.distance_to(player)), enemy.radius)
 	for i in range(enemies.size() - 1, -1, -1):
 		var enemy: Dictionary = enemies[i]
 		var offset: Vector2 = enemy.pos - player
-		var reach: float = combat.reach
-		if offset.length() > reach + enemy.radius:
-			continue
-		if profile.stance == 0 and offset.length() > 28 and facing.dot(offset.normalized()) < 0.25:
-			continue
-		if profile.stance == 2 and (facing.dot(offset) < 0 or absf(facing.cross(offset)) > 24 + enemy.radius):
-			continue
-		landed = hit_enemy(i, combat.damage) or landed
+		var hit := attack_damage_at(offset, enemy.radius, combat, wave_ready, fork)
+		if hit > 0:
+			landed = apply_attack_hit(i, hit, scorch, frost) or landed
+	for i in range(boss_stones.size() - 1, -1, -1):
+		var hit := attack_damage_at(boss_stones[i].pos - player, 22, combat, wave_ready, fork)
+		if hit > 0:
+			hit_stone(i, hit)
+			landed = true
 	if landed:
-		heat = minf(100, heat + 12)
+		heat = minf(100, heat + heat_per_hit())
+		if wave:
+			cleave_chain = (cleave_chain + 1) % 3
+			if wave_ready:
+				wave_flash = 0.18
 		if profile.support == 2:
 			hp = minf(max_hp, hp + max_hp * combat.recovery)
 
@@ -679,15 +867,48 @@ func ember_burst() -> void:
 		return
 	heat = 0
 	return_time = 0
+	feedback.play("burst")
+	feedback.heavy(player, MINT, 4.0)
 	burst(player, MINT, 65)
 	for i in range(enemies.size() - 1, -1, -1):
-		if player.distance_to(enemies[i].pos) <= 250:
+		if player.distance_to(enemies[i].pos) <= 250 and layout.segment_clear(player, enemies[i].pos):
 			hit_enemy(i, damage * 4 * (1 + profile.rune_bonus()))
+	for i in range(boss_stones.size() - 1, -1, -1):
+		if player.distance_to(boss_stones[i].pos) <= 272 and layout.segment_clear(player, boss_stones[i].pos):
+			hit_stone(i, damage * 4 * (1 + profile.rune_bonus()))
 	invincible = maxf(invincible, 0.25)
+
+func hit_stone(index: int, amount: float) -> void:
+	var stone: Dictionary = boss_stones[index]
+	stone.hp -= amount
+	burst(stone.pos, MINT, 5)
+	if stone.hp > 0:
+		return
+	feedback.play("heavy")
+	feedback.heavy(stone.pos, MINT)
+	var owner: int = stone.owner
+	boss_stones.remove_at(index)
+	for enemy in enemies:
+		if enemy.brute and enemy.boss_id == owner and BossFight.stone_count(self, enemy) == 0:
+			enemy.weak_time = 3.0
+			BossFight.recover(enemy, 2.5)
+			hazards = hazards.filter(func(h: Dictionary) -> bool: return h.get("owner", -1) != owner)
+			message = "WARD BROKEN / Sentinel exposed: +35% damage for 3 seconds."
+			break
 
 func defeat_enemy(index: int) -> void:
 	var enemy: Dictionary = enemies[index]
+	feedback.play("heavy" if enemy.brute or enemy.kind == 2 else "kill")
+	if enemy.brute or enemy.kind == 2:
+		feedback.heavy(enemy.pos, GOLD, 4.0 if enemy.brute else 2.5)
 	kills += 1
+	var guard_seal: int = enemy.get("seal_guard", -1)
+	if guard_seal >= 0:
+		seal_guards[guard_seal] = maxi(0, seal_guards[guard_seal] - 1)
+		seal_required = seal_guards[0] + seal_guards[1]
+		if seal_guards[guard_seal] == 0:
+			message = "SEAL %s BROKEN / Follow the main route." % ("I" if guard_seal == 0 else "II")
+			feedback.play("loot")
 	var old_level: int = profile.level
 	var experience: int = (30 if enemy.brute else 8) * (map_index + 1)
 	profile.gain_xp(experience)
@@ -700,10 +921,30 @@ func defeat_enemy(index: int) -> void:
 	if profile.level > old_level:
 		hp = minf(max_hp, hp + 20)
 		message = "Level %d! Permanent base stats increased." % profile.level
-	if enemy.brute or kills == 1 or randf() < 0.45:
-		drops.append({"pos": enemy.pos, "item": profile.roll_item(loot_tier(), enemy.brute)})
+	if enemy.brute or enemy.kind == 2 or kills == 1 or randf() < 0.45:
+		var loot: Dictionary = profile.roll_item(loot_tier(), enemy.brute)
+		if enemy.kind == 2 and loot.rarity == 0:
+			loot = profile.roll_item(loot_tier(), true)
+		drops.append({"pos": enemy.pos, "item": loot})
+	if enemy.elite_mod == 0:
+		add_hazard(enemy.pos, 105, enemy.damage * 1.8, 1.1)
+	if enemy.brute and profile.record_relic_hunt(map_index, loot_tier()):
+		feedback.play("relic")
+		mastery_message = "RELIC FOUND / " + Effects.RELICS[map_index].name
+		mastery_time = 6.0
 	profile.embers += 1 + (run_depth if enemy.brute else 0)
 	if enemy.brute:
+		var owner: int = enemy.boss_id
+		boss_stones = boss_stones.filter(func(stone: Dictionary) -> bool: return stone.owner != owner)
+		hazards = hazards.filter(func(h: Dictionary) -> bool: return h.get("owner", -1) != owner)
+		if shrine.claim_reward():
+			var bonus: Dictionary = profile.roll_item(loot_tier(), true)
+			bonus.favorite = true
+			profile.inventory.append(bonus)
+			found += 1
+			feedback.play("loot")
+			mastery_message = "GREED FULFILLED / BONUS RARE DELIVERED & PROTECTED"
+			mastery_time = 6.0
 		map_cleared = true
 		if abyss:
 			profile.embers += 20 * run_depth * (2 if contract > 0 else 1)
@@ -713,12 +954,14 @@ func defeat_enemy(index: int) -> void:
 			profile.depth = mini(5, maxi(profile.depth, run_depth + 1))
 		else:
 			var advanced: bool = profile.complete_mission(mission)
+			if advanced and profile.campaign % 3 == 0:
+				feedback.play("relic")
 			if advanced and profile.campaign == 9:
 				celebration = "THE CINDER TYRANT HAS FALLEN"
 			elif advanced and profile.campaign % 3 == 0:
 				celebration = "A SEAL SHATTERS"
 		message = "Guardian defeated! Rare loot: E. Return: T. Next journey is ready at the gate."
-	elif kills == seal_required:
+	elif guard_seal >= 0 and seal_required == 0:
 		message = "The seal is broken. The guardian awaits at the eastern altar."
 	if kills % 20 == 0:
 		potions = mini(3, potions + 1)
@@ -728,7 +971,7 @@ func defeat_enemy(index: int) -> void:
 	persist()
 
 func burst(pos: Vector2, color: Color, count: int) -> void:
-	for i in range(count):
+	for i in range(mini(count, maxi(0, 320 - particles.size()))):
 		particles.append({"pos": pos, "velocity": Vector2.RIGHT.rotated(randf() * TAU) * randf_range(30, 170), "life": randf_range(0.15, 0.4), "color": color})
 
 func label_at(pos: Vector2, value: String, size: int, color: Color = PALE) -> void:
@@ -739,7 +982,7 @@ func bar(rect: Rect2, ratio: float, color: Color) -> void:
 	draw_rect(Rect2(rect.position, Vector2(rect.size.x * clampf(ratio, 0, 1), rect.size.y)), color)
 
 func rarity_color(item: Dictionary) -> Color:
-	return [PALE, Color("82b5ff"), GOLD][int(item.rarity)]
+	return [PALE, Color("82b5ff"), GOLD, Color("ff9864")][int(item.rarity)]
 
 func item_stats(item: Dictionary) -> String:
 	if item.is_empty():
@@ -756,18 +999,22 @@ func _draw() -> void:
 	else:
 		draw_world()
 	draw_hud()
+	if feedback.relic_time > 0 and celebration.is_empty() and panel.is_empty():
+		draw_relic_banner(236)
 	if not panel.is_empty():
 		draw_panel()
 	if not profile.save_error.is_empty():
 		label_at(Vector2(30, 715), profile.save_error, 13, RED)
 	if not celebration.is_empty():
-		draw_overlay(celebration, "Depth 5 conquered. The flame is safe." if profile.abyss_complete else ("The story is complete. The Abyss now opens at the town gate." if profile.campaign == 9 else "A relic is in your bag. A new chapter and supports await."))
+		draw_overlay(celebration, "Depth 5 conquered. The flame is safe." if profile.abyss_complete else ("The story is complete. The Abyss now opens at the town gate." if profile.campaign == 9 else "A skill-changing relic is in your bag. A new chapter awaits."))
+		if feedback.relic_time > 0:
+			draw_relic_banner(440)
 		label_at(Vector2(340, 375), "Press any key, collect your loot, then T to return.", 18, MINT)
 	elif ended:
 		draw_overlay("RESCUED FROM THE DEPTHS", "Collected gear and character progress are retained.")
 		label_at(Vector2(389, 397), "Press R to return to town", 24, MINT)
 	elif paused:
-		draw_overlay("PAUSED", "Esc to resume")
+		draw_overlay("PAUSED", "Esc to resume / F10 sound & feedback")
 
 func draw_hub() -> void:
 	draw_set_transform(VIEW.position)
@@ -826,6 +1073,12 @@ func draw_panel() -> void:
 	draw_rect(Rect2(115, 140, 922, 480), Color("506172"), false, 2)
 	draw_rect(CLOSE_RECT, Color("293746"))
 	label_at(CLOSE_RECT.position + Vector2(13, 23), "X", 19, PALE)
+	if panel == "settings":
+		draw_settings()
+		return
+	if panel == "shrine":
+		draw_shrine_panel()
+		return
 	if panel == "trial":
 		draw_trial_panel()
 		return
@@ -845,6 +1098,7 @@ func draw_panel() -> void:
 			label_at(rect.position + Vector2(16, 30), "CHAPTER %d / CLEARED %d OF 3" % [i + 1, clampi(profile.campaign - i * 3, 0, 3)], 13, MUTED)
 			label_at(rect.position + Vector2(16, 64), MAPS[i].name, 18, PALE if available else MUTED)
 			label_at(rect.position + Vector2(16, 98), MAPS[i].boss, 15, GOLD)
+			label_at(rect.position + Vector2(16, 119), "RELIC %d/3: %s" % [profile.relic_hunts[i], ["CLEAVE WAVE", "NOVA PULL", "LANCE FORK"][i]] if profile.campaign >= (i + 1) * 3 else "FIRST CHAPTER CLEAR: RELIC", 11, Color("ff9864"))
 			label_at(rect.position + Vector2(16, 143), "TRAVEL / CLICK OR %d" % (i + 1) if available else "LOCKED / CLEAR PREVIOUS MAP", 13, MINT if available else MUTED)
 		ui_button(Rect2(144, 473, 350, 48), "[4] ABYSS / DEPTH %d" % (profile.depth if selected_depth == 0 else selected_depth) if profile.campaign == 9 else "ABYSS / COMPLETE CHAPTER 3", profile.campaign == 9)
 		ui_button(Rect2(520, 473, 480, 48), CONTRACTS[contract], true)
@@ -869,10 +1123,15 @@ func draw_panel() -> void:
 		label_at(Vector2(612, 271), "Shift-click backpack gear to store it.", 14, MUTED)
 	else:
 		label_at(Vector2(612, 269), "CHARACTER / LEVEL %d" % profile.level, 20, MINT)
-		label_at(Vector2(612, 316), "Attack damage       %d" % damage, 18)
+		label_at(Vector2(612, 316), "Skill hit           %.1f" % expedition_combat().damage, 18)
 		label_at(Vector2(612, 350), "Maximum health      %d" % max_hp, 18)
 		label_at(Vector2(612, 384), "Defense             %d" % armor, 18)
 		label_at(Vector2(612, 418), "Attack interval     %.2fs" % attack_interval, 18)
+		label_at(Vector2(612, 452), "SCORCH %d / FROST %d / CHARGE %d" % [profile.effect_count("scorch"), profile.effect_count("frost"), profile.effect_count("charge")], 12, Color("ff9864"))
+		if not hub and shrine.choice >= 0:
+			label_at(Vector2(612, 514), Shrine.OFFERS[shrine.choice].name, 14, GOLD)
+			label_at(Vector2(612, 540), Shrine.OFFERS[shrine.choice].benefit, 13, MINT)
+			label_at(Vector2(612, 562), Shrine.OFFERS[shrine.choice].cost, 13, RED)
 		label_at(Vector2(612, 480), "Embers: %d / B: build & forge" % profile.embers, 15, MUTED)
 	label_at(Vector2(144, 598), "Hover: compare / Click: equip / Right-click: salvage / F or middle-click: protect / I: close" if hub else "Hover: compare / F or middle-click: protect / Equip & salvage in town / I: close", 14, MUTED)
 	var hovered := hovered_item(get_global_mouse_position())
@@ -930,10 +1189,10 @@ func hovered_item(mouse: Vector2) -> Dictionary:
 
 func tooltip_rect(mouse: Vector2) -> Rect2:
 	var origin := mouse + Vector2(20, 18)
-	if origin.x + 350 > 1140:
-		origin.x = mouse.x - 370
-	origin.y = minf(origin.y, 704 - 260)
-	return Rect2(origin.clamp(Vector2(12, 12), Vector2(790, 444)), Vector2(350, 260))
+	if origin.x + 410 > 1140:
+		origin.x = mouse.x - 430
+	origin.y = minf(origin.y, 704 - 340)
+	return Rect2(origin.clamp(Vector2(12, 12), Vector2(730, 364)), Vector2(410, 340))
 
 func draw_item_tooltip(item: Dictionary, equipped: bool, storage: bool) -> void:
 	var rect := tooltip_rect(get_global_mouse_position())
@@ -954,38 +1213,64 @@ func draw_item_tooltip(item: Dictionary, equipped: bool, storage: bool) -> void:
 		if not equipped:
 			label_at(p + Vector2(261, 67 + i * 26), "%+d" % delta, 16, MINT if delta > 0 else (RED if delta < 0 else MUTED))
 	label_at(p + Vector2(0, 178), "Rune: %s / Forge +%d" % [Profile.STANCES[int(item.rune)] + " +12%" if int(item.get("rune", -1)) >= 0 else "None", int(item.get("upgrade", 0))], 12, MUTED)
-	label_at(p + Vector2(0, 196), "PROTECTED / Cannot be salvaged" if item.get("favorite", false) else "F / middle-click: protect from salvage", 12, MINT)
+	var effect_text := "No special effect"
+	var detail_text := "Magic and Rare gear can carry combat effects."
+	if item.has("relic"):
+		var definition: Dictionary = Effects.RELICS[Effects.relic_index(item.relic)]
+		effect_text = definition.effect
+		detail_text = definition.detail
+	elif item.has("affix"):
+		effect_text = Effects.AFFIXES[item.affix].name + " / normal attacks"
+		detail_text = Effects.AFFIXES[item.affix].text
+	label_at(p + Vector2(0, 204), effect_text, 13, Color("ff9864"))
+	label_at(p + Vector2(0, 228), detail_text, 12, PALE)
+	label_at(p + Vector2(0, 252), "Boss source: chapter %d / first clear or every 3 repeat kills" % (Effects.relic_index(item.relic) + 1) if item.has("relic") else "Matching affixes stack across equipped slots.", 11, MUTED)
+	label_at(p + Vector2(0, 278), "PROTECTED / Cannot be salvaged" if item.get("favorite", false) else "F / middle-click: protect from salvage", 12, MINT)
 	var hint := "Equipped"
 	if not equipped:
 		hint = "Click to take out" if storage else ("Click to equip" if hub else "Equip after returning to town")
 		if panel == "stash" and not storage:
 			hint += " / Shift-click to store"
-	label_at(p + Vector2(0, 214), hint, 13, GOLD)
+	label_at(p + Vector2(0, 300), hint, 13, GOLD)
 
 func draw_world() -> void:
-	draw_set_transform(VIEW.position - camera)
-	draw_rect(WORLD, MAPS[map_index].color)
-	for x in range(0, 2401, 80):
-		draw_line(Vector2(x, 0), Vector2(x, 1500), Color(0.6, 0.7, 0.8, 0.05))
-	for y in range(0, 1501, 80):
-		draw_line(Vector2(0, y), Vector2(2400, y), Color(0.6, 0.7, 0.8, 0.05))
-	draw_line(Vector2(150, 750), Vector2(2180, 750), Color(0.5, 0.5, 0.5, 0.08), 110)
-	draw_rect(WORLD.grow(-5), Color("4c5967"), false, 8)
+	draw_set_transform(VIEW.position - camera + feedback.offset)
+	draw_rect(WORLD, Color("0d121b"))
+	for floor_rect in layout.floors:
+		draw_rect(floor_rect, MAPS[map_index].color)
+		for x in range(int(floor_rect.position.x), int(floor_rect.end.x), 40):
+			draw_line(Vector2(x, floor_rect.position.y), Vector2(x, floor_rect.end.y), Color(0.6, 0.7, 0.8, 0.045))
+		for y in range(int(floor_rect.position.y), int(floor_rect.end.y), 40):
+			draw_line(Vector2(floor_rect.position.x, y), Vector2(floor_rect.end.x, y), Color(0.6, 0.7, 0.8, 0.045))
+	for wall in layout.walls:
+		if Rect2(camera, VIEW.size).grow(40).intersects(wall):
+			draw_rect(wall, Color("26323b"))
+			draw_rect(wall.grow(-3), Color("1a242e"))
+			draw_line(wall.position, wall.position + Vector2(wall.size.x, 0), Color("49535c"), 3)
+	for room in layout.rooms:
+		label_at(room.rect.position + Vector2(18, 30), room.name, 14, MUTED)
+	for i in range(2):
+		var seal_color := MINT if seal_guards[i] == 0 else GOLD
+		draw_arc(layout.seals[i], 46, 0, TAU, 32, seal_color, 3, true)
+		label_at(layout.seals[i] + Vector2(-65, 65), "SEAL %s / %s" % ["I" if i == 0 else "II", "BROKEN" if seal_guards[i] == 0 else "%d GUARDS" % seal_guards[i]], 13, seal_color)
 	draw_arc(Vector2(180, 750), 48, 0, TAU, 40, MINT, 3, true)
 	label_at(Vector2(116, 819), "T / TOWN PORTAL", 14, MINT)
 	draw_arc(Vector2(2130, 750), 130, 0, TAU, 50, GOLD.darkened(0.5), 2, true)
 	draw_trial_world()
+	draw_shrine_world()
 	draw_navigation()
 	for hazard in hazards:
-		draw_circle(hazard.pos, hazard.radius, Color(0.95, 0.2, 0.3, 0.13))
-		draw_arc(hazard.pos, hazard.radius, 0, TAU, 48, RED, 2, true)
-		draw_arc(hazard.pos, hazard.radius * (1 - hazard.time / hazard.duration), 0, TAU, 40, GOLD, 3, true)
+		BossFight.draw_warning(self, hazard)
+	for stone in boss_stones:
+		draw_colored_polygon(PackedVector2Array([stone.pos + Vector2(0, -23), stone.pos + Vector2(18, 0), stone.pos + Vector2(0, 23), stone.pos + Vector2(-18, 0)]), Color("a998f5"))
+		bar(Rect2(stone.pos + Vector2(-24, -32), Vector2(48, 4)), stone.hp / stone.max_hp, MINT)
+		label_at(stone.pos + Vector2(-38, 42), "WARD STONE", 11, MINT)
 	for drop in drops:
 		var color := rarity_color(drop.item)
 		draw_line(drop.pos, drop.pos - Vector2(0, 40), Color(color, 0.4), 3)
 		draw_circle(drop.pos, 7, color)
 		label_at(drop.pos + Vector2(12, -8), drop.item.name, 14, color)
-		if player.distance_to(drop.pos) <= 90:
+		if player.distance_to(drop.pos) <= 90 and layout.segment_clear(player, drop.pos):
 			label_at(drop.pos + Vector2(12, 12), "E / PICK UP", 12, MINT)
 	for enemy in enemies:
 		draw_enemy(enemy)
@@ -1000,9 +1285,20 @@ func draw_world() -> void:
 		var color := Color(0.44, 0.94, 0.82, slash / 0.16)
 		var reach: float = profile.combat_stats().reach
 		if profile.stance == 2:
-			draw_line(player, player + Vector2.RIGHT.rotated(slash_angle) * reach, color, 16, true)
+			draw_line(player, layout.move_body(player, Vector2.RIGHT.rotated(slash_angle) * reach, 1, false), color, 16, true)
 		else:
-			draw_arc(player, reach, 0 if profile.stance == 1 else slash_angle - 1.2, TAU if profile.stance == 1 else slash_angle + 1.2, 48, color, 7, true)
+			draw_visible_arc(reach, 0 if profile.stance == 1 else slash_angle - 1.2, TAU if profile.stance == 1 else slash_angle + 1.2, color, 7)
+	for ring in feedback.rings:
+		var ring_color: Color = ring.color
+		ring_color.a = ring.life / 0.25 * 0.5
+		draw_arc(ring.pos, 20 + (1.0 - ring.life / 0.25) * 65, 0, TAU, 32, ring_color, 2, true)
+	if wave_flash > 0:
+		draw_line(player, layout.move_body(player, Vector2.RIGHT.rotated(slash_angle) * 300, 1, false), Color("ff9864"), 18 * wave_flash / 0.18, true)
+	if pull_flash > 0:
+		draw_visible_arc(250 * pull_flash / 0.18, 0, TAU, Color("ad9cff"), 3)
+	if slash > 0 and profile.stance == 2 and profile.has_relic("lance_fork"):
+		for angle in [-22.0, 22.0]:
+			draw_line(player, layout.move_body(player, Vector2.RIGHT.rotated(slash_angle + deg_to_rad(angle)) * profile.combat_stats().reach, 1, false), Color("ff9864"), 5, true)
 	if return_time > 0:
 		draw_arc(player, 40, -PI / 2, -PI / 2 + TAU * (1 - return_time / 2), 40, MINT, 4, true)
 	for notice in notices:
@@ -1016,19 +1312,30 @@ func draw_world() -> void:
 	draw_rect(VIEW, Color("354355"), false)
 	var mini_rect := Rect2(948, 122, 164, 103)
 	draw_rect(mini_rect, Color(0.02, 0.04, 0.06, 0.85))
+	for floor_rect in layout.floors:
+		draw_rect(Rect2(mini_rect.position + floor_rect.position / WORLD.size * mini_rect.size, floor_rect.size / WORLD.size * mini_rect.size), Color("35464a"))
+	for pillar in layout.pillars:
+		draw_rect(Rect2(mini_rect.position + pillar.position / WORLD.size * mini_rect.size, pillar.size / WORLD.size * mini_rect.size), Color("0b101a"))
+	for i in range(2):
+		draw_arc(mini_rect.position + layout.seals[i] / WORLD.size * mini_rect.size, 4, 0, TAU, 12, MINT if seal_guards[i] == 0 else GOLD, 1.5)
+
 	for enemy in enemies:
 		draw_circle(mini_rect.position + enemy.pos / WORLD.size * mini_rect.size, 4 if enemy.brute else 2, GOLD if enemy.brute else RED)
 	if trial.state != ExpeditionEvent.State.COMPLETE:
 		draw_rect(Rect2(mini_rect.position + trial.position / WORLD.size * mini_rect.size - Vector2(3, 3), Vector2(6, 6)), Color("ad9cff"))
+	var shrine_dot: Vector2 = mini_rect.position + shrine.position / WORLD.size * mini_rect.size
+	draw_colored_polygon(PackedVector2Array([shrine_dot + Vector2(0, -4), shrine_dot + Vector2(4, 0), shrine_dot + Vector2(0, 4), shrine_dot + Vector2(-4, 0)]), GOLD if shrine_available() else MUTED)
 	draw_circle(mini_rect.position + player / WORLD.size * mini_rect.size, 3, MINT)
 	if trial.state == ExpeditionEvent.State.ACTIVE:
 		label_at(Vector2(948, 244), "CACHE / %d GUARDS" % trial.remaining, 12, Color("ad9cff"))
 	for enemy in enemies:
-		if enemy.brute and enemy.aggro and kills >= seal_required:
+		if enemy.brute and enemy.aggro and seal_required == 0:
 			label_at(Vector2(475, 133), "%s / %d%%" % [MAPS[map_index].boss, int(enemy.hp / enemy.max_hp * 100)], 14, GOLD)
 			bar(Rect2(475, 142, 330, 6), enemy.hp / enemy.max_hp, RED)
+			label_at(Vector2(475, 168), enemy.move_name, 12, MINT if enemy.state == "recovery" else GOLD)
+			label_at(Vector2(475, 189), "WARD: 30% LESS DAMAGE" if BossFight.stone_count(self, enemy) > 0 else ("EXPOSED: +35% DAMAGE" if enemy.weak_time > 0 else "PHASE %d" % enemy.phase), 11, MUTED)
 			break
-	label_at(Vector2(34, 135), "BOSS DEFEATED / COLLECT LOOT & RETURN" if map_cleared else ("SEAL / %d OF %d KILLS" % [kills, seal_required] if kills < seal_required else "SEAL BROKEN / DEFEAT THE GUARDIAN"), 15, GOLD)
+	label_at(Vector2(34, 135), "BOSS DEFEATED / COLLECT LOOT & RETURN" if map_cleared else ("SEALS %d / 2 / %d GUARDS" % [int(seal_guards[0] == 0) + int(seal_guards[1] == 0), seal_required] if seal_required > 0 else "SEAL BROKEN / DEFEAT THE GUARDIAN"), 15, GOLD)
 
 func draw_hud() -> void:
 	label_at(Vector2(28, 41), "E M B E R", 29, GOLD)
@@ -1042,10 +1349,15 @@ func draw_hud() -> void:
 	label_at(Vector2(30, 93), message, 14, MINT)
 	label_at(Vector2(780, 74), "[L] %s / %s" % [Profile.LOOT_MODES[profile.loot_mode], "LOOT SETTINGS" if hub else ("DODGE READY" if dash_cooldown <= 0 else "DODGE %.1fs" % dash_cooldown)], 12, MINT)
 	label_at(Vector2(340, 73), "%s Lv.%d + %s Lv.%d / %s" % [Profile.STANCES[profile.stance], profile.skill_levels[profile.stance], Profile.SUPPORTS[profile.support], profile.support_levels[profile.support], "[F] BURST READY" if heat >= 100 else "HEAT %d%%" % heat], 12, GOLD)
+	if not hub and shrine.choice >= 0:
+		label_at(Vector2(34, 155), "PACT / " + Shrine.OFFERS[shrine.choice].name, 12, GOLD)
+		label_at(Vector2(34, 173), Shrine.OFFERS[shrine.choice].benefit + " / " + Shrine.OFFERS[shrine.choice].cost, 11, PALE)
+	if not hub and profile.has_relic(Effects.RELICS[profile.stance].id):
+		label_at(Vector2(34, 186), ["RELIC / WAVE %d OF 3" % cleave_chain, "RELIC / NOVA PULL", "RELIC / LANCE FORK"][profile.stance], 12, Color("ff9864"))
 	if not hub and mastery_time > 0:
-		label_at(Vector2(34, 161), mastery_message, 16, MINT)
+		label_at(Vector2(34, 214), mastery_message, 16, MINT)
 	label_at(Vector2(30, 709), "JOURNEY %d / 9  |  EMBERS %d  |  TALENTS %d  |  %d MIN  |  %s" % [profile.campaign, profile.embers, profile.talent_points(), int(profile.play_seconds / 60), "ABYSS CONQUERED" if profile.abyss_complete else ("ABYSS DEPTH %d" % profile.depth if profile.campaign == 9 else "NEXT: CHAPTER %d - EXPEDITION %d" % [profile.campaign / 3 + 1, profile.campaign % 3 + 1])], 12, MUTED)
-	label_at(Vector2(30, 683), "WASD Move  /  E Interact  /  I Inventory & Salvage  /  B Build & Forge  /  Esc Pause" if hub else "WASD Move / Mouse Aim / LMB-Space Attack / Shift Dodge / F Burst / E Loot / Q Heal / T Town / I Bag / Esc Pause", 13, MUTED)
+	label_at(Vector2(30, 683), "WASD Move  /  E Interact  /  I Inventory & Salvage  /  B Build & Forge  /  F10 Settings" if hub else "WASD Move / Mouse Aim / LMB-Space Attack / Shift Dodge / F Burst / E Loot / Q Heal / T Town / I Bag / F10 Settings", 13, MUTED)
 
 func draw_overlay(title: String, subtitle: String) -> void:
 	draw_rect(Rect2(0, 0, 1152, 720), Color(0.025, 0.04, 0.065, 0.93))
@@ -1057,11 +1369,22 @@ func draw_enemy(enemy: Dictionary) -> void:
 	var pos: Vector2 = enemy.pos
 	var radius: float = enemy.radius
 	var color := GOLD if enemy.brute else (Color("ad9cff") if enemy.kind == 1 else (Color("fcb36b") if enemy.kind == 2 else RED))
-	if enemy.brute and kills < seal_required:
+	if enemy.brute and seal_required > 0:
 		draw_arc(pos, radius + 14, 0, TAU, 40, MINT, 3, true)
+	if int(enemy.get("seal_guard", -1)) >= 0:
+		label_at(pos + Vector2(-5, radius + 15), "I" if enemy.seal_guard == 0 else "II", 11, GOLD)
 	if enemy.get("trial_guard", false):
 		draw_arc(pos, radius + 6, 0, TAU, 24, Color("ad9cff"), 2, true)
-	if enemy.flash > 0:
+	if enemy.burn_time > 0:
+		draw_arc(pos, radius + 3, 0, TAU, 20, Color("ff9864"), 3, true)
+	if enemy.slow_time > 0:
+		draw_arc(pos, radius + 9, 0, TAU, 20, Color("91caff"), 2, true)
+	if enemy.elite_mod >= 0:
+		label_at(pos + Vector2(-44, -radius - 32), Effects.ELITES[enemy.elite_mod], 11, GOLD)
+		label_at(pos + Vector2(-44, -radius - 19), ["DEATH BLAST", "AVOID MARKS", "+45% SPEED"][enemy.elite_mod], 10, MUTED)
+	if enemy.brute and enemy.state == "recovery":
+		draw_arc(pos, radius + 12, 0, TAU, 32, MINT, 3, true)
+	if enemy.flash > 0 and feedback.flash_enabled:
 		color = Color.WHITE
 	draw_circle(pos + Vector2(0, radius * 0.6), radius, Color(0, 0, 0, 0.25))
 	var points := PackedVector2Array()
@@ -1077,7 +1400,7 @@ func draw_enemy(enemy: Dictionary) -> void:
 
 func draw_player() -> void:
 	draw_circle(player + Vector2(0, 10), 19, Color(0, 0, 0, 0.3))
-	var player_color := Color.WHITE if invincible > 0 and int(invincible * 24) % 2 == 0 else MINT
+	var player_color := Color.WHITE if feedback.flash_enabled and invincible > 0 and int(invincible * 24) % 2 == 0 else MINT
 	draw_colored_polygon(PackedVector2Array([player + Vector2(-14, 14), player + Vector2(-11, -9), player + Vector2(0, -18), player + Vector2(11, -9), player + Vector2(14, 14)]), player_color)
 	draw_rect(Rect2(player + Vector2(-8, -7), Vector2(16, 8)), Color("101926"))
 	draw_line(player + Vector2(-5, -3), player + Vector2(5, -3), GOLD, 2)
@@ -1149,7 +1472,10 @@ func draw_mastery_card(is_support: bool, index: int) -> void:
 	var combat: Dictionary = profile.combat_stats(-1 if is_support else index, index if is_support else -1)
 	var effect := Skills.support_effect(index, level) if is_support else "%.1f DMG  /  %.2fs  /  %.0f RANGE" % [combat.damage, combat.interval, combat.reach]
 	label_at(p + Vector2(12, 78), effect, 13, PALE)
-	label_at(p + Vector2(12, 98), entry.role, 12, MUTED)
+	var role: String = entry.role
+	if not is_support and profile.has_relic(Effects.RELICS[index].id):
+		role = ["RELIC / Every third hit sends a wave", "RELIC / Pull enemies into your nova", "RELIC / Two extra piercing rays"][index]
+	label_at(p + Vector2(12, 98), role, 12, Color("ff9864") if role.begins_with("RELIC") else MUTED)
 	var status := "MAX MASTERY" if level == Skills.MAX_LEVEL else "%d / %d XP" % [experience, Skills.xp_needed(level)]
 	if not unlocked:
 		status = "UNLOCK / CLEAR CHAPTER 1"
@@ -1190,7 +1516,7 @@ func draw_mastery_details(is_support: bool, index: int) -> void:
 	else:
 		label_at(p + Vector2(0, 210), "MASTERED / Maximum level reached", 14, GOLD)
 	label_at(p + Vector2(0, 254), "Kills train the equipped pair. Switching keeps progress.", 12, MUTED)
-	label_at(p + Vector2(0, 278), "Normal attacks only; DPS assumes every attack connects.", 12, MUTED)
+	label_at(p + Vector2(0, 278), "DPS excludes burn, relic waves and additional targets.", 12, MUTED)
 	label_at(p + Vector2(0, 301), "Clear chapter 1 to unlock this support." if is_support and not profile.support_unlocked(index) else "Click the card to equip in town. No currency cost.", 12, MINT)
 
 func draw_build() -> void:
@@ -1288,11 +1614,113 @@ func draw_trial_world() -> void:
 
 func draw_navigation() -> void:
 	var target := navigation_target()
-	if target.is_empty() or Rect2(camera, VIEW.size).grow(-25).has_point(target.pos):
+	if target.is_empty() or (Rect2(camera, VIEW.size).grow(-25).has_point(target.pos) and layout.segment_clear(player, target.pos)):
 		return
-	var direction: Vector2 = (target.pos - player).normalized()
+	var waypoint: Vector2 = layout.guide(player, target.pos)
+	var direction: Vector2 = (waypoint - player).normalized()
 	var center := player + direction * 76
 	var side := direction.orthogonal()
 	var color := GOLD if target.brute else MINT
 	draw_colored_polygon(PackedVector2Array([center + direction * 13, center - direction * 8 + side * 7, center - direction * 8 - side * 7]), color)
-	label_at(center + Vector2(-23, 27), "BOSS" if target.brute else "HUNT", 11, color)
+	label_at(center + Vector2(-23, 27), "BOSS" if target.brute else "SEAL", 11, color)
+
+func draw_relic_banner(y: float) -> void:
+	draw_rect(Rect2(355, y, 442, 54), Color("271e24"))
+	draw_rect(Rect2(355, y, 442, 54), Color("ff9864"), false, 2)
+	label_at(Vector2(378, y + 23), "RELIC ACQUIRED / A NEW WAY TO FIGHT", 17, Color("ff9864"))
+	label_at(Vector2(378, y + 43), "Protected in your bag. I: inspect and equip.", 14, PALE)
+
+func draw_visible_arc(radius: float, start: float, end: float, color: Color, width: float) -> void:
+	for i in range(48):
+		var a := player + Vector2.RIGHT.rotated(lerpf(start, end, i / 48.0)) * radius
+		var b := player + Vector2.RIGHT.rotated(lerpf(start, end, (i + 1) / 48.0)) * radius
+		if layout.segment_clear(player, a) and layout.segment_clear(player, b):
+			draw_line(a, b, color, width, true)
+
+func expedition_combat() -> Dictionary:
+	var combat: Dictionary = profile.combat_stats()
+	combat.damage *= shrine.multiplier("attack")
+	return combat
+
+func heat_per_hit() -> float:
+	return (12 + profile.effect_count("charge") * 4) * shrine.multiplier("heat")
+
+func potion_healing() -> float:
+	return max_hp * 0.5 * shrine.multiplier("potion")
+
+func use_potion() -> bool:
+	if hub or ended or paused or not panel.is_empty() or not celebration.is_empty() or potions <= 0 or hp >= max_hp:
+		return false
+	potions -= 1
+	hp = minf(max_hp, hp + potion_healing())
+	return true
+
+func shrine_available() -> bool:
+	if hub or ended or map_cleared or shrine.choice >= 0:
+		return false
+	# The bargain must precede the guardian fight, including a damaged but disengaged boss.
+	for enemy in enemies:
+		if enemy.brute and (enemy.aggro or enemy.hp < enemy.max_hp):
+			return false
+	return true
+
+func choose_shrine(option: int) -> bool:
+	if paused or panel != "shrine" or not celebration.is_empty() or not shrine_available() or player.distance_to(shrine.position) > 100 or not layout.segment_clear(player, shrine.position):
+		return false
+	if not shrine.choose(option):
+		return false
+	var factor: float = shrine.multiplier("health")
+	for enemy in enemies:
+		# Preserve damage already dealt as a percentage; never refill a wounded enemy.
+		enemy.hp *= factor
+		enemy.max_hp *= factor
+	for stone in boss_stones:
+		stone.hp *= factor
+		stone.max_hp *= factor
+	close_panel()
+	feedback.play("heavy")
+	burst(shrine.position, GOLD, 28)
+	message = Shrine.OFFERS[option].name + " / " + Shrine.OFFERS[option].benefit + " / " + Shrine.OFFERS[option].cost + ". This expedition only."
+	return true
+
+func shrine_card(index: int) -> Rect2:
+	return Rect2(144 + index * 292, 254, 276, 262)
+
+func shrine_preview(option: int) -> Array[String]:
+	match option:
+		0:
+			return ["Hit %.1f -> %.1f" % [profile.combat_stats().damage, profile.combat_stats().damage * shrine.multiplier("attack", option)], "Potion %.1f -> %.1f HP" % [max_hp * 0.5, max_hp * 0.5 * shrine.multiplier("potion", option)]]
+		1:
+			return ["Heat %.0f -> %.0f / hit" % [heat_per_hit(), heat_per_hit() * shrine.multiplier("heat", option)], "100 damage -> 115 before armor"]
+		_:
+			return ["Bonus Rare / Tier %d" % loot_tier(), "All living & future enemies"]
+
+func draw_shrine_panel() -> void:
+	label_at(Vector2(144, 186), "SHRINE OF BARGAINS / OPTIONAL", 24, GOLD)
+	label_at(Vector2(144, 222), "Choose one pact for this expedition. Take a benefit and its cost together.", 16, PALE)
+	for i in range(3):
+		var rect := shrine_card(i)
+		var offer: Dictionary = Shrine.OFFERS[i]
+		draw_rect(rect, Color("282329"))
+		draw_rect(rect, GOLD if rect.has_point(get_global_mouse_position()) else MUTED, false, 2)
+		var p := rect.position + Vector2(14, 30)
+		label_at(p, offer.name, 19, GOLD)
+		label_at(p + Vector2(0, 38), offer.benefit, 16, MINT)
+		label_at(p + Vector2(0, 68), offer.cost, 16, RED)
+		label_at(p + Vector2(0, 106), offer.hint, 13, MUTED)
+		var preview := shrine_preview(i)
+		label_at(p + Vector2(0, 145), preview[0], 15, PALE)
+		label_at(p + Vector2(0, 170), preview[1], 13, PALE)
+		label_at(p + Vector2(0, 214), "ACCEPT / CLICK OR %d" % (i + 1), 15, GOLD)
+	label_at(Vector2(144, 549), "One pact per expedition. No switching. Ends on death or return to town.", 15, MUTED)
+	label_at(Vector2(144, 577), "Esc / E: leave without a pact. Available until the guardian fight begins.", 15, MINT)
+
+func draw_shrine_world() -> void:
+	var pos: Vector2 = shrine.position
+	var color := GOLD if shrine_available() else MUTED
+	draw_arc(pos, 34, 0, TAU, 32, color, 2, true)
+	draw_colored_polygon(PackedVector2Array([pos + Vector2(0, -26), pos + Vector2(17, 0), pos + Vector2(0, 26), pos + Vector2(-17, 0)]), color.darkened(0.25))
+	draw_circle(pos, 5, PALE)
+	label_at(pos + Vector2(-82, -44), "SHRINE / OPTIONAL" if shrine_available() else ("PACT TAKEN" if shrine.choice >= 0 else "SHRINE DORMANT"), 13, color)
+	if shrine_available() and player.distance_to(pos) <= 100 and layout.segment_clear(player, pos):
+		label_at(pos + Vector2(-80, 58), "[E] WEIGH THE COST", 13, GOLD)

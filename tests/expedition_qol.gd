@@ -44,9 +44,10 @@ func run() -> void:
 	var initial_count: int = scene.enemies.size()
 	var target: Dictionary = scene.navigation_target()
 	check(not target.is_empty() and not target.brute, "Navigation avoids sealed guardian")
-	scene.kills = scene.seal_required
+	var guards: int = scene.seal_required
+	scene.seal_required = 0
 	check(scene.navigation_target().brute, "Navigation points to unsealed guardian")
-	scene.kills = 0
+	scene.seal_required = guards
 	scene.player = scene.trial.position
 	scene.interact_field()
 	check(scene.panel == "trial", "Nearby cursed cache opens reward choice")

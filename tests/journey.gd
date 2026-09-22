@@ -66,7 +66,7 @@ func run() -> void:
 		check(scene.mission == mission, "Mission tracks chapter progress")
 		for i in range(scene.enemies.size() - 2, -1, -1):
 			scene.hit_enemy(i, 100000)
-		check(scene.kills >= scene.seal_required, "Finite population can break seal")
+		check(scene.seal_required == 0, "Finite population can break seal")
 		scene.hit_enemy(0, 100000)
 		check(scene.map_cleared and scene.profile.campaign == mission + 1, "Boss advances story exactly once")
 		check(scene.drops[-1].item.rarity == 2, "Guardian has guaranteed rare")

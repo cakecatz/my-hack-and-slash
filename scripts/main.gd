@@ -1,5 +1,6 @@
 extends Node2D
 
+const Mods = preload("res://scripts/item_mods.gd")
 const Shrine = preload("res://scripts/expedition_shrine.gd")
 const Layout = preload("res://scripts/expedition_layout.gd")
 const Feedback = preload("res://scripts/combat_feedback.gd")
@@ -86,6 +87,11 @@ var stash_page := 0
 # Empty, inventory, stash, or gate. Open panels suspend world simulation.
 var panel := ""
 var build_tab := 0
+var craft_slot := "weapon"
+var craft_index := 0
+var craft_id := "might"
+var craft_tier := 3
+var craft_pending: Dictionary = {}
 var mastery_message := ""
 var mastery_time := 0.0
 var attack_blocked := false
@@ -169,6 +175,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				panel = "build"
 			return
 		if event.keycode == KEY_I:
+			craft_pending.clear()
 			if panel == "inventory" or panel == "stash":
 				close_panel()
 			else:
@@ -209,6 +216,7 @@ func close_panel() -> void:
 		paused = settings_previous_paused
 		attack_blocked = true
 		return
+	craft_pending.clear()
 	panel = ""
 	attack_blocked = true
 
@@ -790,7 +798,7 @@ func update_enemy_statuses(delta: float) -> void:
 				if enemy.hp <= 0:
 					defeat_enemy(i)
 
-func apply_attack_hit(index: int, amount: float, scorch: int, frost: int) -> bool:
+func apply_attack_hit(index: int, amount: float, scorch: float, frost: float) -> bool:
 	var enemy: Dictionary = enemies[index]
 	if enemy.brute and seal_required > 0:
 		return false
@@ -835,8 +843,8 @@ func attack() -> void:
 	if not wave:
 		cleave_chain = 0
 	var wave_ready := wave and cleave_chain == 2
-	var scorch: int = profile.effect_count("scorch")
-	var frost: int = profile.effect_count("frost")
+	var scorch: float = profile.effect_count("scorch")
+	var frost: float = profile.effect_count("frost")
 	if pull:
 		pull_flash = 0.18
 		for enemy in enemies:
@@ -987,7 +995,8 @@ func rarity_color(item: Dictionary) -> Color:
 func item_stats(item: Dictionary) -> String:
 	if item.is_empty():
 		return "Empty slot"
-	return "ATK %d   HP %d   DEF %d   SPD %d%%" % [item.attack, item.health, item.armor, item.haste]
+	var stats := Mods.totals(item)
+	return "ATK %d   HP %d   DEF %d   SPD %d%%" % [stats.attack, stats.health, stats.armor, stats.haste]
 
 func map_rect(index: int) -> Rect2:
 	return Rect2(144 + index * 292, 280, 276, 170)
@@ -1127,7 +1136,7 @@ func draw_panel() -> void:
 		label_at(Vector2(612, 350), "Maximum health      %d" % max_hp, 18)
 		label_at(Vector2(612, 384), "Defense             %d" % armor, 18)
 		label_at(Vector2(612, 418), "Attack interval     %.2fs" % attack_interval, 18)
-		label_at(Vector2(612, 452), "SCORCH %d / FROST %d / CHARGE %d" % [profile.effect_count("scorch"), profile.effect_count("frost"), profile.effect_count("charge")], 12, Color("ff9864"))
+		label_at(Vector2(612, 452), "BURN %.0f%%/s / SLOW %.1f%% / HEAT +%.0f" % [profile.effect_count("scorch") * 20, (1.0 - pow(0.85, profile.effect_count("frost"))) * 100, profile.effect_count("charge") * 4], 12, Color("ff9864"))
 		if not hub and shrine.choice >= 0:
 			label_at(Vector2(612, 514), Shrine.OFFERS[shrine.choice].name, 14, GOLD)
 			label_at(Vector2(612, 540), Shrine.OFFERS[shrine.choice].benefit, 13, MINT)
@@ -1195,6 +1204,9 @@ func tooltip_rect(mouse: Vector2) -> Rect2:
 	return Rect2(origin.clamp(Vector2(12, 12), Vector2(730, 364)), Vector2(410, 340))
 
 func draw_item_tooltip(item: Dictionary, equipped: bool, storage: bool) -> void:
+	if item.has("mods"):
+		draw_mod_tooltip(item)
+		return
 	var rect := tooltip_rect(get_global_mouse_position())
 	draw_rect(Rect2(rect.position + Vector2(5, 5), rect.size), Color(0, 0, 0, 0.5))
 	draw_rect(rect, Color("0c1420"))
@@ -1208,7 +1220,7 @@ func draw_item_tooltip(item: Dictionary, equipped: bool, storage: bool) -> void:
 	var names := ["Attack damage", "Maximum health", "Defense", "Attack speed %"]
 	for i in range(4):
 		var key: String = keys[i]
-		var delta := int(item[key]) - int(current.get(key, 0))
+		var delta := int(Mods.totals(item)[key]) - int(Mods.totals(current)[key])
 		label_at(p + Vector2(0, 67 + i * 26), "%s: %d" % [names[i], item[key]], 16)
 		if not equipped:
 			label_at(p + Vector2(261, 67 + i * 26), "%+d" % delta, 16, MINT if delta > 0 else (RED if delta < 0 else MUTED))
@@ -1521,9 +1533,12 @@ func draw_mastery_details(is_support: bool, index: int) -> void:
 
 func draw_build() -> void:
 	label_at(Vector2(144, 176), "THE EMBER GRIMOIRE", 23, GOLD)
-	for tab in range(2):
-		ui_button(build_tab_rect(tab), ["SKILLS & SUPPORTS", "TALENTS & FORGE"][tab], build_tab == tab)
-	label_at(Vector2(731, 213), "EMBERS %d / POINTS %d" % [profile.embers, profile.talent_points()], 12, MUTED)
+	for tab in range(3):
+		ui_button(build_tab_rect(tab), ["SKILLS & SUPPORTS", "TALENTS & FORGE", "MOD CRAFTING"][tab], build_tab == tab)
+	label_at(Vector2(731, 176), "EMBERS %d / POINTS %d" % [profile.embers, profile.talent_points()], 12, MUTED)
+	if build_tab == 2:
+		draw_crafting()
+		return
 	if build_tab == 1:
 		draw_forge_tab()
 		return
@@ -1557,10 +1572,16 @@ func draw_forge_tab() -> void:
 func build_click(mouse: Vector2) -> void:
 	if not hub or panel != "build":
 		return
-	for tab in range(2):
+	if not craft_pending.is_empty():
+		craft_click(mouse)
+		return
+	for tab in range(3):
 		if build_tab_rect(tab).has_point(mouse):
 			build_tab = tab
 			return
+	if build_tab == 2:
+		craft_click(mouse)
+		return
 	for i in range(3):
 		if build_tab == 0:
 			if mastery_rect(false, i).has_point(mouse):
@@ -1724,3 +1745,112 @@ func draw_shrine_world() -> void:
 	label_at(pos + Vector2(-82, -44), "SHRINE / OPTIONAL" if shrine_available() else ("PACT TAKEN" if shrine.choice >= 0 else "SHRINE DORMANT"), 13, color)
 	if shrine_available() and player.distance_to(pos) <= 100 and layout.segment_clear(player, pos):
 		label_at(pos + Vector2(-80, 58), "[E] WEIGH THE COST", 13, GOLD)
+
+func craft_row(index: int) -> Rect2:
+	return Rect2(144, 318 + index * 49, 394, 43)
+
+func draw_crafting() -> void:
+	for i in range(3):
+		ui_button(Rect2(144 + i * 286, 250, 270, 40), Profile.SLOTS[i].to_upper(), craft_slot == Profile.SLOTS[i])
+	var item: Dictionary = profile.equipment[craft_slot]
+	if Mods.capacity(item) == 0:
+		label_at(Vector2(144, 345), "Equip Magic or Rare gear to craft its Mods.", 22, GOLD)
+		label_at(Vector2(144, 387), "Common gear and Relics keep their own identity. I: equip a crafting base.", 16, MUTED)
+		return
+	label_at(Vector2(144, 311), "%s / BASE TIER %d" % [item.name, item.tier], 15, GOLD)
+	var mods := Mods.entries(item)
+	for i in range(4):
+		ui_button(craft_row(i), ("P%d  " % (i + 1) if i < 2 else "S%d  " % (i - 1)) + (Mods.describe(mods[i]) if i % 2 < Mods.capacity(item) else "Rare gear required"), craft_index == i)
+	if not craft_pending.is_empty():
+		label_at(Vector2(566, 318), "CRAFT RESULT / COST PAID", 20, GOLD)
+		label_at(Vector2(566, 357), "OLD: " + Mods.describe(mods[craft_index]), 13, MUTED)
+		label_at(Vector2(566, 387), "NEW: " + Mods.describe(craft_pending.item.mods[craft_index]), 13, MINT)
+		var before := Mods.totals(item)
+		var after := Mods.totals(craft_pending.item)
+		label_at(Vector2(566, 422), "ATK %d -> %d / LIFE %d -> %d" % [before.attack, after.attack, before.health, after.health], 15)
+		label_at(Vector2(566, 449), "DEF %d -> %d / SPD %d%% -> %d%%" % [before.armor, after.armor, before.haste, after.haste], 15)
+		ui_button(Rect2(566, 478, 208, 40), "KEEP NEW", true)
+		ui_button(Rect2(790, 478, 214, 40), "KEEP OLD")
+		label_at(Vector2(144, 571), "Closing keeps the old Mod. Materials are spent for the attempt; no refunds.", 15, MUTED)
+		return
+	var pool := Mods.pool(craft_index / 2)
+	if not craft_id in pool:
+		craft_id = pool[0]
+	for i in range(pool.size()):
+		ui_button(Rect2(566 + i % 2 * 222, 306 + i / 2 * 45, 214, 38), Mods.DEFINITIONS[pool[i]].name, craft_id == pool[i])
+	for i in range(3):
+		ui_button(Rect2(566 + i * 146, 404, 138, 38), "T%d%s" % [3 - i, " LOCKED" if 3 - i < Mods.best_tier(item) else ""], craft_tier == 3 - i)
+	var limits: Array = Mods.DEFINITIONS[craft_id].ranges[3 - craft_tier]
+	label_at(Vector2(566, 469), "%d-%d %s / selected Mod: 100%%" % [limits[0], limits[1], Mods.DEFINITIONS[craft_id].unit], 14, PALE)
+	var quote: Dictionary = profile.craft_quote(craft_slot, craft_index, craft_id, craft_tier)
+	ui_button(Rect2(566, 487, 438, 40), "UNAVAILABLE / LOCK, TIER OR DUPLICATE" if quote.is_empty() else "CRAFT / %d EMBERS%s" % [quote.cost, " / NOT ENOUGH" if profile.embers < quote.cost else ""], not quote.is_empty() and profile.embers >= quote.cost)
+	ui_button(Rect2(144, 526, 394, 38), "UNLOCK SELECTED MOD" if mods[craft_index].get("locked", false) else "LOCK SELECTED MOD / FREE", not mods[craft_index].is_empty())
+	label_at(Vector2(566, 552), "Cost is spent on rolling. Keep new or old; no refund.", 12, MUTED)
+	label_at(Vector2(144, 591), "Select slot -> Mod -> Tier. Only that slot changes. T1 is strongest; higher bases unlock it.", 14, MUTED)
+
+func craft_click(mouse: Vector2) -> void:
+	if not hub or panel != "build" or build_tab != 2:
+		return
+	if not craft_pending.is_empty():
+		if Rect2(566, 478, 208, 40).has_point(mouse):
+			message = "New Mod kept." if profile.accept_craft(craft_pending) else "Equipment changed; old item preserved."
+		elif Rect2(790, 478, 214, 40).has_point(mouse):
+			message = "Original Mod kept. Attempt cost consumed."
+		else:
+			return
+		craft_pending.clear()
+		refresh_stats()
+		hp = max_hp
+		persist()
+		return
+	for i in range(3):
+		if Rect2(144 + i * 286, 250, 270, 40).has_point(mouse):
+			craft_slot = Profile.SLOTS[i]
+			craft_index = 0
+			craft_id = "might"
+			craft_tier = maxi(craft_tier, Mods.best_tier(profile.equipment[craft_slot]))
+			return
+	var item: Dictionary = profile.equipment[craft_slot]
+	if Mods.capacity(item) == 0:
+		return
+	for i in range(4):
+		if craft_row(i).has_point(mouse) and i % 2 < Mods.capacity(item):
+			craft_index = i
+			craft_id = Mods.pool(i / 2)[0]
+			return
+	var pool := Mods.pool(craft_index / 2)
+	for i in range(pool.size()):
+		if Rect2(566 + i % 2 * 222, 306 + i / 2 * 45, 214, 38).has_point(mouse):
+			craft_id = pool[i]
+			return
+	for i in range(3):
+		if Rect2(566 + i * 146, 404, 138, 38).has_point(mouse) and 3 - i >= Mods.best_tier(item):
+			craft_tier = 3 - i
+			return
+	if Rect2(144, 526, 394, 38).has_point(mouse):
+		profile.toggle_mod_lock(craft_slot, craft_index)
+		persist()
+	elif Rect2(566, 487, 438, 40).has_point(mouse):
+		craft_pending = profile.begin_craft(profile.craft_quote(craft_slot, craft_index, craft_id, craft_tier))
+		if not craft_pending.is_empty():
+			persist() # Attempts cost materials even when rejected or the game is closed.
+
+func draw_mod_tooltip(item: Dictionary) -> void:
+	var rect := tooltip_rect(get_global_mouse_position())
+	draw_rect(rect, Color("0c1420"))
+	draw_rect(rect, rarity_color(item), false, 2)
+	var p := rect.position + Vector2(14, 25)
+	label_at(p, "%s / BASE T%d" % [item.name, item.tier], 17, rarity_color(item))
+	label_at(p + Vector2(0, 26), "%s / %s / TEMPER +%d" % [Profile.RARITIES[item.rarity], item.slot.to_upper(), item.get("upgrade", 0)], 12, MUTED)
+	label_at(p + Vector2(0, 52), "BASE: ATK %d / HP %d / DEF %d / SPD %d%%" % [item.attack, item.health, item.armor, item.haste], 12)
+	var mods := Mods.entries(item)
+	for i in range(4):
+		label_at(p + Vector2(0, 80 + i * 24), ("PREFIX " if i < 2 else "SUFFIX ") + (Mods.describe(mods[i]) if i % 2 < Mods.capacity(item) else "--"), 12, MINT if i < 2 else GOLD)
+	label_at(p + Vector2(0, 185), item_stats(item), 13, PALE)
+	var actual := Mods.totals(item)
+	var current := Mods.totals(profile.equipment[item.slot])
+	label_at(p + Vector2(0, 209), "VS EQUIPPED: ATK %+d / HP %+d / DEF %+d / SPD %+d%%" % [actual.attack - current.attack, actual.health - current.health, actual.armor - current.armor, actual.haste - current.haste], 11, MINT)
+	label_at(p + Vector2(0, 234), "Rune: " + (Profile.STANCES[item.rune] if item.get("rune", -1) >= 0 else "None"), 13, GOLD)
+	label_at(p + Vector2(0, 260), "B > MOD CRAFTING / T3 -> T2 -> T1", 12, MUTED)
+	label_at(p + Vector2(0, 285), "SALVAGE PROTECTED" if item.get("favorite", false) else "F / middle click: protect from salvage", 12, MINT)
+	label_at(p + Vector2(0, 307), "Mod locks protect crafting slots, not the item from salvage.", 11, MUTED)

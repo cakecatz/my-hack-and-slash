@@ -1,6 +1,7 @@
 extends RefCounted
 ## Persistent character and equipment. Expedition state is deliberately separate.
 
+const Mods = preload("res://scripts/item_mods.gd")
 const Skills = preload("res://scripts/skill_catalog.gd")
 
 const Effects = preload("res://scripts/item_effects.gd")
@@ -166,11 +167,10 @@ func complete_mission(mission: int) -> bool:
 		inventory.append(make_relic(campaign / 3 - 1, campaign / 3))
 	return true
 
-func effect_count(id: String) -> int:
-	var count := 0
+func effect_count(id: String) -> float:
+	var count := 0.0
 	for item in equipment.values():
-		if item.get("affix", "") == id:
-			count += 1
+		count += Mods.effect(item, id)
 	return count
 
 func has_relic(id: String) -> bool:
@@ -183,6 +183,7 @@ func make_relic(index: int, tier: int) -> Dictionary:
 	var definition: Dictionary = Effects.RELICS[index]
 	var item := roll_item(clampi(tier, 1, 9), true, definition.slot)
 	item.erase("affix")
+	item.erase("mods")
 	item.name = definition.name
 	item.rarity = 3
 	item.relic = definition.id
@@ -207,7 +208,7 @@ func stats() -> Dictionary:
 	var result := {"attack": 8 + (level - 1) * 2, "health": 100 + (level - 1) * 5, "armor": 0, "haste": 0}
 	for item in equipment.values():
 		for stat in result:
-			result[stat] += int(item.get(stat, 0))
+			result[stat] += Mods.totals(item)[stat]
 	result.attack += talents[0] * 5
 	result.health += talents[1] * 20
 	result.armor += talents[1]
@@ -243,8 +244,7 @@ func roll_item(tier: int, boss: bool = false, target_slot: String = "") -> Dicti
 			item.name = "Ember charm"
 	if rarity >= 1:
 		item.health += randi_range(5, 12) * tier
-		item.affix = Effects.AFFIXES.keys().pick_random()
-		item.name = Effects.AFFIXES[item.affix].name + " " + item.name
+		item.mods = Mods.generate(item)
 	if rarity == 2:
 		item.attack += tier * 3
 		item.haste += 4
@@ -275,7 +275,7 @@ func save_to(path: String = SAVE_PATH) -> bool:
 	if file == null:
 		save_error = "Save failed. Progress is in memory only."
 		return false
-	file.store_string(JSON.stringify({"version": 6, "relic_hunts": relic_hunts, "loot_mode": loot_mode, "skill_levels": skill_levels, "skill_xp": skill_xp, "support_levels": support_levels, "support_xp": support_xp, "campaign": campaign, "depth": depth, "abyss_complete": abyss_complete, "embers": embers, "stance": stance, "support": support, "talents": talents, "play_seconds": play_seconds, "inventory": inventory, "stash": stash, "equipment": equipment, "level": level, "xp": xp, "unlocked": unlocked}))
+	file.store_string(JSON.stringify({"version": 7, "relic_hunts": relic_hunts, "loot_mode": loot_mode, "skill_levels": skill_levels, "skill_xp": skill_xp, "support_levels": support_levels, "support_xp": support_xp, "campaign": campaign, "depth": depth, "abyss_complete": abyss_complete, "embers": embers, "stance": stance, "support": support, "talents": talents, "play_seconds": play_seconds, "inventory": inventory, "stash": stash, "equipment": equipment, "level": level, "xp": xp, "unlocked": unlocked}))
 	file.flush()
 	var write_error := file.get_error()
 	file.close()
@@ -298,6 +298,8 @@ func valid_item(item: Variant) -> bool:
 	for key in ["rune", "upgrade"]:
 		if item.has(key) and (not (item[key] is float or item[key] is int) or item[key] != int(item[key])):
 			return false
+	if not Mods.valid(item):
+		return false
 	if item.has("affix") and (not item.affix is String or not Effects.AFFIXES.has(item.affix)):
 		return false
 	if item.has("relic"):
@@ -317,7 +319,7 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	if file == null:
 		return false
 	var data: Variant = JSON.parse_string(file.get_as_text())
-	if not data is Dictionary or (data.get("version") != 1 and data.get("version") != 2 and data.get("version") != 3 and data.get("version") != 4 and data.get("version") != 5 and data.get("version") != 6):
+	if not data is Dictionary or (data.get("version") != 1 and data.get("version") != 2 and data.get("version") != 3 and data.get("version") != 4 and data.get("version") != 5 and data.get("version") != 6 and data.get("version") != 7):
 		return false
 	if not data.get("inventory") is Array or not data.get("equipment") is Dictionary:
 		return false
@@ -382,7 +384,7 @@ func load_from(path: String = SAVE_PATH) -> bool:
 		var saved_mode: Variant = data.get("loot_mode")
 		if not (saved_mode is int or saved_mode is float) or saved_mode != int(saved_mode) or not int(saved_mode) in [0, 1, 2]:
 			return false
-	if data.version == 6:
+	if data.version >= 6:
 		if not data.get("relic_hunts") is Array or data.relic_hunts.size() != 3:
 			return false
 		for value in data.relic_hunts:
@@ -410,7 +412,7 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	talents.assign(data.get("talents", [0, 0, 0]))
 	play_seconds = float(data.get("play_seconds", 0))
 	loot_mode = int(data.loot_mode) if data.version >= 5 else 1
-	relic_hunts.assign(data.relic_hunts if data.version == 6 else [0, 0, 0])
+	relic_hunts.assign(data.relic_hunts if data.version >= 6 else [0, 0, 0])
 	skill_levels.assign(data.skill_levels if data.version >= 4 else [1, 1, 1])
 	skill_xp.assign(data.skill_xp if data.version >= 4 else [0, 0, 0])
 	support_levels.assign(data.support_levels if data.version >= 4 else [1, 1, 1])
@@ -418,11 +420,55 @@ func load_from(path: String = SAVE_PATH) -> bool:
 	return true
 
 func normalize_item(item: Dictionary) -> Dictionary:
-	var result := item.duplicate()
+	var result := item.duplicate(true)
 	if not result.is_empty():
 		for key in ["rarity", "tier", "attack", "health", "armor", "haste"]:
 			result[key] = int(result[key])
 		for key in ["rune", "upgrade"]:
 			if result.has(key):
 				result[key] = int(result[key])
+		if result.has("mods"):
+			for mod in result.mods:
+				if not mod.is_empty():
+					mod.tier = int(mod.tier)
+					mod.value = int(mod.value)
 	return result
+
+func craft_quote(slot: String, index: int, id: String, tier: int) -> Dictionary:
+	var item: Dictionary = equipment.get(slot, {})
+	var price := Mods.cost(item, index, id, tier)
+	if price < 0:
+		return {}
+	return {"cost": price, "snapshot": item.duplicate(true), "slot": slot, "index": index, "id": id, "tier": tier}
+
+func begin_craft(quote: Dictionary) -> Dictionary:
+	if quote.is_empty():
+		return {}
+	var current := craft_quote(quote.slot, quote.index, quote.id, quote.tier)
+	if current != quote or embers < int(quote.cost):
+		return {}
+	embers -= int(quote.cost)
+	var result := quote.duplicate(true)
+	result.item = quote.snapshot.duplicate(true)
+	result.item.mods = Mods.entries(result.item)
+	result.item.erase("affix")
+	result.item.mods[quote.index] = Mods.roll(quote.id, quote.tier)
+	return result
+
+func accept_craft(result: Dictionary) -> bool:
+	if result.is_empty() or equipment.get(result.slot, {}) != result.snapshot or not valid_item(result.item):
+		return false
+	equipment[result.slot] = result.item.duplicate(true)
+	return true
+
+func toggle_mod_lock(slot: String, index: int) -> bool:
+	var item: Dictionary = equipment.get(slot, {})
+	if index < 0 or index >= 4 or Mods.capacity(item) == 0:
+		return false
+	var mods := Mods.entries(item)
+	if mods[index].is_empty():
+		return false
+	mods[index].locked = not mods[index].locked
+	item.mods = mods
+	item.erase("affix")
+	return true

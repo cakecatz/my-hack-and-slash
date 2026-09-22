@@ -110,9 +110,23 @@ Godot 4.7.2で `project.godot` を開き、F5で実行します。外部素材�
 - 左の **STASH** に近づいて **E**。持ち物をShift＋クリックで預け、倉庫の品をクリックで取り出します。
 - グリッドは各6列×4行。ホイール・PREV/NEXTでページ切替。パネル表示中はゲームが停止します。
 
+## Modとクラフト
+
+拠点で`B → MOD CRAFTING`を開き、装備中のMagic・Rareを加工できます。
+
+- 基礎性能とランダムModを分離。Magicは接頭1＋接尾1、Rareは接頭2＋接尾2の最大4Mod。
+- 接頭は攻撃・HP・防御、接尾は攻撃速度・燃焼・減速・熱量。装備内で同じ種類は重複しません。
+- Mod TierはT3→T2→T1の順に強くなります。装備のBase Tier 1ではT3、2ではT2、3以上ではT1まで加工可能。
+- 枠・Mod・Tierを選ぶと、そのModを100%付与し数値だけ範囲内で抽選します。費用は`(4 + Base Tier × 2) × (4 - Mod Tier)`残火。
+- 試行時に費用を払い、新旧を比較して採用または見送り。見送り・画面を閉じる・終了では元の装備が残り、費用は返却されません。
+- 選んだ1枠以外は変更せず、Modのロックも可能。ロックは加工保護、お気に入りは分解保護として別に扱います。
+- CommonとRelicは対象外。従来の3段階強化・ルーン・分解保護は維持します。
+
+旧セーブの装備は基礎性能・旧特殊効果を保持します。初回加工やModロック時に旧特殊効果をT3の接尾Modとして取り込みます。保存形式はv7で、v1〜v6も読み込めます。
+
 ## 特殊効果と固有装備
 
-Magic・Rareには以下の特殊効果が1つ付きます。通常攻撃で発動し、装備している部位の効果が合算されます。
+Magic・Rareの接尾Modには以下の特殊効果が付きます。表はT3の値で、T2は効果量1.25倍、T1は1.5倍です。通常攻撃で発動し、複数部位の燃焼・熱量は合算、減速は乗算で適用します。
 
 | 効果 | 挙動 |
 | --- | --- |
@@ -174,6 +188,7 @@ Magic・Rareには以下の特殊効果が1つ付きます。通常攻撃で発�
 - `scripts/main.gd`：拠点、ビルドUI、戦闘、進行、描画
 - `scripts/profile.gd`：装備・才能・鍛冶・個別スキル成長・永続化
 - `scripts/boss_fight.gd`：ボスの行動状態・攻撃予兆・形状判定
+- `scripts/item_mods.gd`：接頭／接尾Mod・Tier・抽選範囲・枠制限・費用・検証
 - `scripts/item_effects.gd`：通常装備の特殊効果・固有装備・精鋭特性の定義
 - `scripts/expedition_event.gd`：任意の宝箱イベントと完了状態
 - `scripts/skill_catalog.gd`：スキル説明と、戦闘・プレビューで共有する成長式
@@ -182,6 +197,7 @@ Magic・Rareには以下の特殊効果が1つ付きます。通常攻撃で発�
 - `tests/mastery.gd`：個別成長・上限・実ダメージ・射程・回復・カード操作・旧形式移行
 - `tests/expedition_qol.gd`：宝箱・報酬・自動回収・分解保護・並べ替え・保存移行
 - `tests/build_identity.gd`：固有スキル挙動・装備効果・精鋭行動・確定入手・保存移行
+- `tests/crafting.gd`：Mod生成・枠／Tier制限・保護・費用・採用／見送り・保存・戦闘反映
 - `tests/shrine.gd`：祭壇操作・実ダメージ・回復・熱量・敵HP・追加報酬・解除・利用制限
 - `tests/layout.gd`：全配置の接続・出現位置・封印・任意攻略・壁判定・敵追跡・ボスと守護石
 - `tests/feedback.gd`：音声データ・再生上限・消音・ヒットストップ・設定操作・保存・後処理
@@ -197,6 +213,7 @@ godot --headless --log-file /tmp/ember-bosses.log --path . --script tests/bosses
 godot --headless --log-file /tmp/ember-feedback.log --path . --script tests/feedback.gd
 godot --headless --log-file /tmp/ember-layout.log --path . --script tests/layout.gd
 godot --headless --log-file /tmp/ember-shrine.log --path . --script tests/shrine.gd
+godot --headless --log-file /tmp/ember-craft.log --path . --script tests/crafting.gd
 ```
 
 テストは実キャラクターを読み書きせず、一時セーブのみを使用します。

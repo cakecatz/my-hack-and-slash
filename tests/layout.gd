@@ -13,18 +13,25 @@ func run() -> void:
 	root.add_child(scene)
 	scene.set_process(false)
 	scene.profile.unlocked = 3
-	for chapter in range(3):
-		for expedition in range(3):
-			seed(340 + chapter * 3 + expedition)
-			scene.profile.campaign = chapter * 3 + expedition
+	# Every template and both mirrorings stay connected and fully playable.
+	for template in range(scene.layout.template_count()):
+		for mirror in range(2):
+			var chapter: int = (template + mirror) % 3
+			scene.profile.campaign = chapter * 3
+			scene.profile.unlocked = 3
+			scene.layout_template = template
+			scene.layout_flip = mirror
 			scene.enter_map(chapter)
 			var terrain = scene.layout
-			check(terrain.rooms.size() == 6, "Six room types in every expedition")
+			check(terrain.rooms.size() == 6, "Six named rooms in every layout")
+			check(terrain.seal_centers.size() == 2 and terrain.optional_centers.size() >= 1, "Layout exposes seal and optional anchors")
+			check(terrain.can_stand(terrain.arrival, 18) and terrain.can_stand(terrain.shrine_point, 18) and terrain.can_stand(terrain.boss_point, 32), "Arrival, shrine and boss stand on floor")
+			check(terrain.shrine_point.distance_to(terrain.cache) > 200, "Shrine is distinct from the vault")
 			terrain.update_flow(scene.player)
 			check(terrain.distances.size() == terrain.walkable.size(), "All navigation cells connected to arrival")
-			for destination in [terrain.cache, terrain.seals[0], terrain.seals[1], Vector2(2130, 750)]:
+			for destination in [terrain.cache, terrain.seals[0], terrain.seals[1], terrain.shrine_point, terrain.boss_point]:
 				var path: PackedVector2Array = terrain.path(scene.player, destination)
-				check(path.size() > 1, "Cache, both seals and boss reachable")
+				check(path.size() > 1, "Cache, both seals, shrine and boss reachable")
 				var point: Vector2 = scene.player
 				for waypoint in path:
 					point = terrain.move_body(point, waypoint - point, 32)
@@ -32,6 +39,7 @@ func run() -> void:
 			for enemy in scene.enemies:
 				check(terrain.can_stand(enemy.pos, enemy.radius), "Every enemy spawns outside walls")
 				check(not terrain.path(scene.player, enemy.pos).is_empty(), "Every guard has a reachable floor cell")
+			check(scene.seal_guards[0] > 0 and scene.seal_guards[1] > 0, "Both seals are guarded in every layout")
 			var count: int = scene.seal_required
 			for i in range(scene.enemies.size() - 1, -1, -1):
 				if not scene.enemies[i].brute and scene.enemies[i].get("seal_guard", -1) < 0:
@@ -51,6 +59,9 @@ func run() -> void:
 			scene.hit_enemy(0, 100000)
 			check(scene.map_cleared and scene.trial.state == 0, "Vault encounter remains optional for progression")
 			scene.return_to_hub()
+	# Wall collision, cover and navigation use the shared model; exercise template zero.
+	scene.layout_template = 0
+	scene.layout_flip = 0
 	scene.profile.campaign = 0
 	scene.enter_map(0)
 	var terrain = scene.layout
@@ -68,8 +79,8 @@ func run() -> void:
 		check(pursuer.distance_to(across) < 5, "All enemy sizes route around a pillar")
 		pursuer = terrain.cache
 		for i in range(1600):
-			pursuer = terrain.chase(pursuer, Vector2(1500, 780), radius, 4)
-		check(pursuer.distance_to(Vector2(1500, 780)) < 5, "Vault guards traverse narrow branch and return to main route")
+			pursuer = terrain.chase(pursuer, terrain.seals[1], radius, 4)
+		check(pursuer.distance_to(terrain.seals[1]) < 5, "Vault guards traverse narrow branch and return to main route")
 	scene.enemies.clear()
 	scene.player = point
 	scene.facing = Vector2.RIGHT
@@ -150,8 +161,20 @@ func run() -> void:
 	scene.BossFight.step(scene, boss, 0.01)
 	for stone in scene.boss_stones:
 		check(terrain.can_stand(stone.pos, 22) and not terrain.path(scene.player, stone.pos).is_empty(), "Summoned wards stay reachable beside room walls")
+	scene.layout_template = -1
+	scene.layout_flip = -1
+	# Random selection varies the layout across expeditions but always stays valid.
+	var seen: Dictionary = {}
+	for i in range(24):
+		scene.profile.campaign = 0
+		scene.profile.unlocked = 3
+		scene.enter_map(0)
+		seen[scene.layout.arrival] = true
+		check(scene.seal_guards[0] > 0 and scene.seal_guards[1] > 0, "Random layout is fully guarded")
+		scene.return_to_hub()
+	check(seen.size() > 1, "Random expeditions vary the layout")
 	scene.queue_free()
 	await process_frame
 	if not failed:
-		print("PASS: all room variants, connectivity, spawn clearance, two seals, optional vault, wall collision, cover and enemy navigation")
+		print("PASS: all layout templates and mirrors, connectivity, spawn clearance, two seals, optional vault, wall collision, cover and enemy navigation")
 	quit(1 if failed else 0)

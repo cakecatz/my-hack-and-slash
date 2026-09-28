@@ -74,7 +74,7 @@ func run() -> void:
 	scene.set_process(false)
 	scene.profile = p
 	scene.panel = "build"
-	scene.build_tab = 2
+	scene.build_tab = 4
 	scene.craft_slot = "weapon"
 	scene.craft_index = 1
 	scene.craft_id = "guard"

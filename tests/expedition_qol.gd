@@ -150,10 +150,18 @@ func run() -> void:
 	check(not loaded.load_from(path), "Invalid item protection rejected")
 	saved.version = 4
 	saved.erase("loot_mode")
+	# A version four save predates the link system: 3 skills and per-support levels.
+	saved.erase("supports")
+	saved.skill_levels = [saved.skill_levels[0], saved.skill_levels[1], saved.skill_levels[2]]
+	saved.skill_xp = [saved.skill_xp[0], saved.skill_xp[1], saved.skill_xp[2]]
+	saved.support_levels = [1, 1, 1]
+	saved.support_xp = [0, 0, 0]
+	saved.support = 0
+	saved.talents = [saved.talents[0], saved.talents[1], saved.talents[2]]
 	file = FileAccess.open(path, FileAccess.WRITE)
 	file.store_string(JSON.stringify(saved))
 	file.close()
-	check(loaded.load_from(path) and loaded.loot_mode == 1 and loaded.inventory == scene.profile.inventory, "Version four migrates to nondestructive auto pickup")
+	check(loaded.load_from(path) and loaded.loot_mode == 1 and loaded.inventory == scene.profile.inventory and loaded.skill_levels.size() == 8 and loaded.slot_link_ids(0).size() == 1, "Version four migrates to nondestructive auto pickup and a link build")
 	DirAccess.remove_absolute(path)
 	scene.queue_free()
 	if not failed:

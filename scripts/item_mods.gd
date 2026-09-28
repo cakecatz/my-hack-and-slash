@@ -1,5 +1,6 @@
 extends RefCounted
 ## Four explicit slots: two prefixes and two suffixes. T1 is strongest.
+const Loc = preload("res://scripts/loc.gd")
 const DEFINITIONS := {
 	"might": {"name": "Might", "side": 0, "stat": "attack", "ranges": [[3, 5], [6, 8], [9, 12]], "unit": "attack"},
 	"vitality": {"name": "Vitality", "side": 0, "stat": "health", "ranges": [[8, 12], [16, 22], [28, 36]], "unit": "life"},
@@ -92,8 +93,9 @@ static func cost(item: Dictionary, index: int, id: String, tier: int) -> int:
 	return (4 + int(item.tier) * 2) * (4 - tier)
 static func describe(mod: Dictionary) -> String:
 	if mod.is_empty():
-		return "Empty Mod slot"
+		return Loc.t("Empty Mod slot")
+	var lock := Loc.t(" [LOCK]") if mod.locked else ""
 	if mod.id in ["scorch", "frost", "charge"]:
-		var effect_text: String = {"scorch": "Burn %.0f%%/s (2s)" % (mod.value * 0.2), "frost": "Slow %.1f%% (1.5s)" % (100.0 * (1.0 - pow(0.85, mod.value / 100.0))), "charge": "+%.0f heat / hit" % (mod.value * 0.04)}[mod.id]
-		return "%s T%d / %s%s" % [DEFINITIONS[mod.id].name, mod.tier, effect_text, " [LOCK]" if mod.locked else ""]
-	return "%s T%d / +%d %s%s" % [DEFINITIONS[mod.id].name, mod.tier, mod.value, DEFINITIONS[mod.id].unit, " [LOCK]" if mod.locked else ""]
+		var effect_text: String = {"scorch": Loc.t("Burn %.0f%%/s (2s)") % (mod.value * 0.2), "frost": Loc.t("Slow %.1f%% (1.5s)") % (100.0 * (1.0 - pow(0.85, mod.value / 100.0))), "charge": Loc.t("+%.0f heat / hit") % (mod.value * 0.04)}[mod.id]
+		return Loc.t("%s T%d / %s%s") % [Loc.t(DEFINITIONS[mod.id].name), mod.tier, effect_text, lock]
+	return Loc.t("%s T%d / +%d %s%s") % [Loc.t(DEFINITIONS[mod.id].name), mod.tier, mod.value, Loc.t(DEFINITIONS[mod.id].unit), lock]

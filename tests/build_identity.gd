@@ -41,6 +41,9 @@ func run() -> void:
 	scene.save_enabled = false
 	root.add_child(scene)
 	scene.set_process(false)
+	# Force the deterministic first layout so hard-coded coordinates stay valid.
+	scene.layout_template = 0
+	scene.layout_flip = 0
 	scene.enter_map(0)
 	reset(scene)
 	scene.profile.equipment.weapon = scene.profile.make_relic(0, 1)
@@ -157,6 +160,14 @@ func run() -> void:
 	var legacy := saved.duplicate(true)
 	legacy.version = 5
 	legacy.erase("relic_hunts")
+	# Pre-v8 saves predate the link system: 3 skills and per-support levels.
+	legacy.erase("supports")
+	legacy.skill_levels = [legacy.skill_levels[0], legacy.skill_levels[1], legacy.skill_levels[2]]
+	legacy.skill_xp = [legacy.skill_xp[0], legacy.skill_xp[1], legacy.skill_xp[2]]
+	legacy.support_levels = [1, 1, 1]
+	legacy.support_xp = [0, 0, 0]
+	legacy.support = 0
+	legacy.talents = [legacy.talents[0], legacy.talents[1], legacy.talents[2]]
 	# Old gear retains its old stats rather than silently changing item identity.
 	legacy.equipment.weapon = Profile.new().equipment.weapon
 	legacy.inventory = []

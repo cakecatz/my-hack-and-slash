@@ -25,6 +25,9 @@ func run() -> void:
 	scene.save_enabled = false
 	root.add_child(scene)
 	scene.set_process(false)
+	# Force the deterministic first layout so hard-coded coordinates stay valid.
+	scene.layout_template = 0
+	scene.layout_flip = 0
 	var boss := boss_for(scene, 0)
 	scene.step(0.01)
 	check(boss.state == "windup" and boss.move == "sweep", "Warden starts with a readable sweep")

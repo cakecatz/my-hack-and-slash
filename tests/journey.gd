@@ -17,6 +17,9 @@ func run() -> void:
 	scene.save_enabled = false
 	root.add_child(scene)
 	scene.set_process(false)
+	# Force the deterministic first layout so hard-coded coordinates stay valid.
+	scene.layout_template = 0
+	scene.layout_flip = 0
 	check(not scene.enter_map(2, true), "Abyss cannot bypass story")
 	# Combat geometry, healing and seal protection use the real attack path.
 	scene.enter_map(0)
@@ -35,14 +38,14 @@ func run() -> void:
 		check((scene.enemies[0].hp < rear) == (style == 1), "Only nova hits behind")
 		check((scene.enemies[1].hp < front) == (style == 2), "Only lance reaches ranged target")
 		scene.enemies.clear()
-	scene.profile.support = 2
+	scene.profile.set_slot_links(0, ["leech"])
 	scene.hp = scene.max_hp / 2
 	var health: float = scene.hp
 	scene.attack()
-	check(scene.hp == health, "Siphon cannot heal by attacking air")
+	check(scene.hp == health, "Leech cannot heal by attacking air")
 	scene.spawn_enemy(scene.player + Vector2(60, 0))
 	scene.attack()
-	check(scene.hp > health, "Siphon heals once on a landed attack")
+	check(scene.hp > health, "Leech heals once on a landed attack")
 	scene.heat = 100
 	scene.return_time = 2
 	scene.ember_burst()
@@ -59,7 +62,7 @@ func run() -> void:
 	scene.step(0.06)
 	check(scene.hp == health, "Dodge immunity prevents hazard damage")
 	scene.return_to_hub()
-	scene.profile.support = 0
+	scene.profile.set_slot_links(0, [])
 	# Clear all nine expeditions; earlier chapters cannot advance current chapter.
 	for mission in range(9):
 		check(scene.enter_map(mission / 3), "Enter current campaign expedition")
@@ -92,9 +95,9 @@ func run() -> void:
 	check(not profile.upgrade("charm"), "Empty slot cannot be upgraded")
 	check(profile.spend_talent(0), "Earned talent can be spent")
 	scene.panel = "build"
-	scene.build_click(scene.build_tab_rect(1).get_center())
+	scene.build_click(scene.build_tab_rect(2).get_center())
 	scene.build_click(Rect2(144, 550, 270, 40).get_center())
-	check(profile.talents == [0, 0, 0], "Build UI refunds talents")
+	check(profile.talents == [0, 0, 0, 0], "Build UI refunds talents")
 	var count: int = profile.inventory.size()
 	check(profile.salvage(0) and profile.inventory.size() == count - 1 and profile.embers > balance, "Salvage exchanges owned gear for embers")
 	# Gate restrictions and every endgame depth, with rewards and final ending.
@@ -118,7 +121,7 @@ func run() -> void:
 	check(scene.selected_depth == 1 and scene.enter_abyss() and scene.run_depth == 1, "Gate can select a lower unlocked depth")
 	scene.return_to_hub(true)
 	check(profile.depth == 5 and profile.abyss_complete, "Failed replay retains highest depth and victory")
-	profile.support = 1
+	profile.set_slot_links(0, ["haste"])
 	profile.stance = 2
 	profile.spend_talent(2)
 	profile.play_seconds = 1234.5
@@ -126,9 +129,9 @@ func run() -> void:
 	check(profile.save_to(path), "Save full endgame profile")
 	var restored = Profile.new()
 	check(restored.load_from(path), "Load full endgame profile")
-	check(restored.campaign == 9 and restored.depth == 5 and restored.abyss_complete and restored.support == 1 and restored.stance == 2 and restored.talents == profile.talents and restored.inventory == profile.inventory and restored.embers == profile.embers and restored.play_seconds == 1234.5, "All new fields and high tier loot survive reload")
+	check(restored.campaign == 9 and restored.depth == 5 and restored.abyss_complete and restored.slot_link_ids(0) == ["haste"] and restored.stance == 2 and restored.talents == profile.talents and restored.inventory == profile.inventory and restored.embers == profile.embers and restored.play_seconds == 1234.5, "All new fields and high tier loot survive reload")
 	var data: Dictionary = JSON.parse_string(FileAccess.get_file_as_string(path))
-	data.talents = [100, 0, 0]
+	data.talents = [100, 0, 0, 0]
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	file.store_string(JSON.stringify(data))
 	file.close()
@@ -137,7 +140,7 @@ func run() -> void:
 	file = FileAccess.open(path, FileAccess.WRITE)
 	file.store_string(JSON.stringify(data))
 	file.close()
-	check(restored.load_from(path) and restored.campaign == 6 and restored.depth == 1 and restored.support == 0 and not restored.abyss_complete, "Version two migrates unlocked chapters and clears newer state")
+	check(restored.load_from(path) and restored.campaign == 6 and restored.depth == 1 and restored.slot_link_ids(0).is_empty() and not restored.abyss_complete, "Version two migrates unlocked chapters and clears newer state")
 	DirAccess.remove_absolute(path)
 	scene.queue_free()
 	if not failed:

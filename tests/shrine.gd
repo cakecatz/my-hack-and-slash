@@ -17,6 +17,9 @@ func run() -> void:
 	scene.save_enabled = false
 	root.add_child(scene)
 	scene.set_process(false)
+	# Force the deterministic first layout so hard-coded coordinates stay valid.
+	scene.layout_template = 0
+	scene.layout_flip = 0
 	check(not scene.choose_shrine(0), "Cannot choose in hub")
 	fresh(scene)
 	check(scene.panel == "shrine" and scene.shrine.choice == -1, "Nearby shrine opens optional offer")

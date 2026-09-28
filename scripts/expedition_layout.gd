@@ -1,53 +1,144 @@
 extends RefCounted
-## Six connected room types. A shared wall model drives movement, sight and navigation.
+## Hand-built room templates. One is picked at random per expedition and may be
+## mirrored, so routes vary while every template stays fully connected.
+
 const CELL := 40
 const SIZE := Vector2i(60, 38)
+const WORLD := Vector2(2400, 1500)
 const STEPS := [Vector2i.LEFT, Vector2i.RIGHT, Vector2i.UP, Vector2i.DOWN]
+
+## Rooms are edge-shared with corridors; connecting edges land on cell centres.
+const TEMPLATES := [
+	{
+		"name": "CROSSROADS",
+		"rooms": [
+			{"rect": Rect2(80, 560, 360, 400), "name": "ARRIVAL"},
+			{"rect": Rect2(440, 680, 360, 160), "name": "NARROW PASS"},
+			{"rect": Rect2(800, 440, 440, 640), "name": "PILLAR HALL / SEAL I"},
+			{"rect": Rect2(1320, 440, 400, 640), "name": "ENCIRCLEMENT / SEAL II"},
+			{"rect": Rect2(840, 80, 400, 240), "name": "CURSED VAULT / OPTIONAL"},
+			{"rect": Rect2(1760, 280, 560, 960), "name": "GUARDIAN SANCTUM"}
+		],
+		"corridors": [Rect2(1240, 680, 80, 160), Rect2(1720, 680, 40, 160), Rect2(1000, 320, 120, 120)],
+		"pillars": [Rect2(920, 600, 80, 120), Rect2(1120, 840, 80, 120)],
+		"chapter_pillars": [[], [Rect2(1440, 600, 80, 80)], [Rect2(1480, 880, 120, 80)]],
+		"arrival": Vector2(180, 750),
+		"shrine": Vector2(340, 620),
+		"boss": Vector2(2130, 750),
+		"cache": Vector2(1060, 200),
+		"seals": [Vector2(1060, 780), Vector2(1500, 780)],
+		"optional": [Vector2(940, 200), Vector2(1140, 200)]
+	},
+	{
+		"name": "RING",
+		"rooms": [
+			{"rect": Rect2(80, 620, 360, 320), "name": "ARRIVAL"},
+			{"rect": Rect2(400, 720, 240, 140), "name": "NARROW PASS"},
+			{"rect": Rect2(600, 520, 440, 520), "name": "PILLAR HALL / SEAL I"},
+			{"rect": Rect2(1160, 520, 440, 520), "name": "ENCIRCLEMENT / SEAL II"},
+			{"rect": Rect2(600, 200, 400, 240), "name": "CURSED VAULT / OPTIONAL"},
+			{"rect": Rect2(1760, 520, 560, 520), "name": "GUARDIAN SANCTUM"}
+		],
+		"corridors": [Rect2(1000, 680, 240, 200), Rect2(1560, 720, 240, 140), Rect2(760, 400, 120, 160)],
+		"pillars": [Rect2(700, 600, 80, 120), Rect2(880, 860, 80, 120)],
+		"chapter_pillars": [[], [Rect2(1280, 640, 120, 80)], [Rect2(1400, 880, 80, 120)]],
+		"arrival": Vector2(180, 780),
+		"shrine": Vector2(200, 900),
+		"boss": Vector2(2040, 780),
+		"cache": Vector2(800, 320),
+		"seals": [Vector2(820, 780), Vector2(1380, 780)],
+		"optional": [Vector2(800, 320), Vector2(980, 320)]
+	},
+	{
+		"name": "GAUNTLET",
+		"rooms": [
+			{"rect": Rect2(80, 700, 320, 320), "name": "ARRIVAL"},
+			{"rect": Rect2(360, 780, 240, 120), "name": "NARROW PASS"},
+			{"rect": Rect2(560, 560, 400, 520), "name": "PILLAR HALL / SEAL I"},
+			{"rect": Rect2(1800, 560, 400, 520), "name": "ENCIRCLEMENT / SEAL II"},
+			{"rect": Rect2(1120, 80, 400, 320), "name": "CURSED VAULT / OPTIONAL"},
+			{"rect": Rect2(2100, 540, 300, 520), "name": "GUARDIAN SANCTUM"}
+		],
+		"corridors": [Rect2(1120, 520, 520, 560), Rect2(920, 760, 280, 160), Rect2(1560, 760, 280, 160), Rect2(1280, 320, 160, 280)],
+		"pillars": [Rect2(1300, 700, 80, 120), Rect2(1440, 900, 80, 120)],
+		"chapter_pillars": [[], [Rect2(1880, 700, 80, 80)], [Rect2(1920, 900, 120, 80)]],
+		"arrival": Vector2(160, 820),
+		"shrine": Vector2(200, 960),
+		"boss": Vector2(2280, 800),
+		"cache": Vector2(1320, 220),
+		"seals": [Vector2(760, 800), Vector2(2000, 800)],
+		"optional": [Vector2(1400, 700), Vector2(1320, 220)]
+	}
+]
+
 var floors: Array[Rect2] = []
 var walls: Array[Rect2] = []
 var pillars: Array[Rect2] = []
 var rooms: Array[Dictionary] = []
-var seals: Array[Vector2] = [Vector2(1060, 780), Vector2(1500, 780)]
+var seals: Array[Vector2] = []
+var seal_centers: Array[Vector2] = []
+var optional_centers: Array[Vector2] = []
+var arrival := Vector2(180, 750)
+var shrine_point := Vector2(340, 620)
+var boss_point := Vector2(2130, 750)
 var cache := Vector2(1060, 200)
+var flipped := false
 var walkable: Dictionary = {}
 var distances: Dictionary = {}
 var flow_goal := Vector2i(-1, -1)
 var grid := AStarGrid2D.new()
 
-func build(chapter: int, expedition: int) -> void:
+func template_count() -> int:
+	return TEMPLATES.size()
+
+func template_name(index: int) -> String:
+	return TEMPLATES[posmod(index, TEMPLATES.size())].name
+
+func mirror_rect(rect: Rect2) -> Rect2:
+	return Rect2(WORLD.x - rect.end.x, rect.position.y, rect.size.x, rect.size.y) if flipped else rect
+
+func mirror_point(point: Vector2) -> Vector2:
+	return Vector2(WORLD.x - point.x, point.y) if flipped else point
+
+func build(chapter: int, expedition: int, template_index: int = 0, mirror: bool = false) -> void:
 	floors.clear()
 	walls.clear()
 	pillars.clear()
 	rooms.clear()
+	seals.clear()
+	seal_centers.clear()
+	optional_centers.clear()
 	walkable.clear()
 	distances.clear()
 	flow_goal = Vector2i(-1, -1)
-	var bottom := (chapter + expedition) % 2 == 1
-	cache = Vector2(1060, 1320 if bottom else 200)
-	rooms.assign([
-		{"rect": Rect2(80, 560, 360, 400), "name": "ARRIVAL"},
-		{"rect": Rect2(440, 680, 360, 160), "name": "NARROW PASS"},
-		{"rect": Rect2(800, 440, 440, 640), "name": "PILLAR HALL / SEAL I"},
-		{"rect": Rect2(1320, 440, 400, 640), "name": "ENCIRCLEMENT / SEAL II"},
-		{"rect": Rect2(840, 1200 if bottom else 80, 400, 240), "name": "CURSED VAULT / OPTIONAL"},
-		{"rect": Rect2(1760, 280, 560, 960), "name": "GUARDIAN SANCTUM"}
-	])
-	for room in rooms:
-		floors.append(room.rect)
-	floors.append(Rect2(1240, 680, 80, 160))
-	floors.append(Rect2(1720, 680, 40, 160))
-	floors.append(Rect2(1000, 1080 if bottom else 320, 120, 120))
-	# Cover differs by chapter; every layout retains both sides of each pillar.
-	pillars.assign([Rect2(920, 600, 80, 120), Rect2(1120, 840, 80, 120)])
-	if chapter == 1:
-		pillars.append(Rect2(1440, 600, 80, 80))
-	elif chapter == 2:
-		pillars.append(Rect2(1480, 880, 120, 80))
+	flipped = mirror
+	var template: Dictionary = TEMPLATES[posmod(template_index, TEMPLATES.size())]
+	for room in template.rooms:
+		var rect := mirror_rect(room.rect)
+		rooms.append({"rect": rect, "name": room.name})
+		floors.append(rect)
+	for corridor in template.corridors:
+		floors.append(mirror_rect(corridor))
+	for pillar in template.pillars:
+		pillars.append(mirror_rect(pillar))
+	var chapter_pillars: Array = template.chapter_pillars
+	if chapter >= 0 and chapter < chapter_pillars.size():
+		for pillar in chapter_pillars[chapter]:
+			pillars.append(mirror_rect(pillar))
+	arrival = mirror_point(template.arrival)
+	shrine_point = mirror_point(template.shrine)
+	boss_point = mirror_point(template.boss)
+	cache = mirror_point(template.cache)
+	for point in template.seals:
+		seal_centers.append(mirror_point(point))
+	seals.assign(seal_centers)
+	for point in template.optional:
+		optional_centers.append(mirror_point(point))
 	# Merge horizontal runs of solid cells into rectangles for collision and drawing.
 	for y in range(SIZE.y):
 		var start := -1
 		for x in range(SIZE.x + 1):
-			var solid := x < SIZE.x and not is_floor(Vector2(x * CELL + 20, y * CELL + 20))
+			var solid: bool = x < SIZE.x and not is_floor(Vector2(x * CELL + 20, y * CELL + 20))
 			if solid and start < 0:
 				start = x
 			elif not solid and start >= 0:
@@ -73,7 +164,7 @@ func build(chapter: int, expedition: int) -> void:
 	for y in range(SIZE.y):
 		for x in range(SIZE.x):
 			var cell := Vector2i(x, y)
-			var clear := can_stand(center(cell), 33)
+			var clear: bool = can_stand(center(cell), 33)
 			grid.set_point_solid(cell, not clear)
 			if clear:
 				walkable[cell] = true
